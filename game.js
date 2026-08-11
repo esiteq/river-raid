@@ -1,0 +1,1461 @@
+/* ==========================================================================
+   RIVER RAID — браузерний рімейк на Phaser 3
+   Ретро pixel-art спрайти намальовані програмно (без зовнішніх картинок).
+   Керування: ← → рух, ↑ прискорення, ↓ гальмо, SPACE постріл/старт,
+   P або ESC — пауза.
+   ========================================================================== */
+
+'use strict';
+
+// ---------------------------------------------------------------------------
+// КОНСТАНТИ
+// ---------------------------------------------------------------------------
+const W = 480;
+// ігрове поле займає всю висоту екрана: беремо реальну висоту вікна
+// (з розумними межами, щоб на крихітних чи величезних екранах усе лишалось
+// грабельним), а не фіксовані 640px як раніше
+const H = Math.round(Phaser.Math.Clamp(
+  (typeof window !== 'undefined' ? window.innerHeight : 640), 640, 1400));
+const ROW_H = 8;                       // висота одного "рядка" рельєфу в px
+const ROWS_COUNT = Math.ceil(H / ROW_H) + 6;
+
+const PLAYER_Y = H - 130;              // фіксована екранна Y-позиція гравця
+const PLAYER_HALF_W = 11;              // половина ширини хітбокса літака
+const PLAYER_SPEED_X = 230;            // px/сек, бічний рух
+
+const MIN_SPEED = 16;                  // мін. швидкість скролу (px/сек) — майже зупинка для заправки
+const CRUISE_SPEED = 130;              // швидкість старту/респавну
+const BASE_MAX_SPEED = 230;            // макс. швидкість скролу на 1 рівні
+const THROTTLE_ACCEL = 260;            // px/сек^2
+
+const MISSILE_SPEED = 520;
+const FUEL_MAX = 100;
+const FUEL_DRAIN_BASE = 2.0;           // одиниць/сек на мін. швидкості
+const FUEL_DRAIN_MAX = 5.2;            // одиниць/сек на макс. швидкості
+const FUEL_REFILL_RATE = 42;
+
+const INVULN_TIME = 2.0;               // сек недоторканності після респавну
+const EXTRA_LIFE_STEP = 10000;
+
+const COL = {
+  green: 0x2ecc40, greenDark: 0x1c8a2c, greenDarker: 0x0f5a19,
+  cockpit: 0x8fe3ff, red: 0xe03c3c, redDark: 0x8f1f1f,
+  gray: 0x9aa0a6, grayDark: 0x555b60, grayDarker: 0x33383c,
+  yellowFuel: 0xf5c400, orange: 0xff8c1a, brown: 0x6b4a2b,
+  white: 0xffffff, black: 0x000000, tan: 0xd9c08a,
+  waterBlue: 0x1560c4,
+  landGreen: 0x0e6b1a, landGreenEdge: 0x18a02a,
+  bridgeGray: 0x9aa0a6, bridgeDark: 0x555b60,
+  exploYellow: 0xffe066, exploOrange: 0xff8c42, exploRed: 0xe03c3c,
+  hudGreen: 0x39ff6a,
+  tankBody: 0x5a6b2f, tankDark: 0x38431c, tankBarrel: 0x24291a,
+  prideRed: 0xe4032e, prideOrange: 0xff8c1a, prideYellow: 0xffed4a,
+  prideGreen: 0x2ecc40, prideBlue: 0x1f6feb, pridePurple: 0x8a3fe0,
+  basket: 0x7a5230
+};
+
+// ---------------------------------------------------------------------------
+// ДОПОМІЖНЕ: синтезовані звуки (Web Audio, без зовнішніх файлів)
+// ---------------------------------------------------------------------------
+const SFX = {
+  ctx: null,
+  ensure() {
+    if (!this.ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) this.ctx = new AC();
+    }
+    if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+  },
+  tone(freq, dur, type, gainVal, glideTo) {
+    this.ensure();
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type || 'square';
+    osc.frequency.setValueAtTime(freq, ctx.currentTime);
+    if (glideTo) osc.frequency.linearRampToValueAtTime(glideTo, ctx.currentTime + dur);
+    gain.gain.setValueAtTime(gainVal || 0.08, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + dur);
+  },
+  shoot() { this.tone(720, 0.09, 'square', 0.05, 300); },
+  explode() {
+    this.ensure();
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const bufSize = ctx.sampleRate * 0.3;
+    const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufSize);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.18, ctx.currentTime);
+    src.connect(gain).connect(ctx.destination);
+    src.start();
+  },
+  fuel() { this.tone(400, 0.15, 'sine', 0.06, 900); },
+  crash() { this.tone(220, 0.6, 'sawtooth', 0.09, 40); },
+  bridge() { this.tone(150, 0.5, 'square', 0.1, 700); },
+  life() { this.tone(500, 0.12, 'sine', 0.08, 1200); },
+  tankShot() { this.tone(170, 0.14, 'sawtooth', 0.07, 80); },
+  extraLife() {
+    this.tone(600, 0.1, 'sine', 0.08, 900);
+    setTimeout(() => this.tone(900, 0.2, 'sine', 0.09, 1400), 90);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// ГЕНЕРАЦІЯ PIXEL-ART ТЕКСТУР (процедурно, без картинок ззовні)
+// ---------------------------------------------------------------------------
+function P(g, px, x, y, w, h, color) {
+  g.fillStyle(color, 1);
+  g.fillRect(x * px, y * px, w * px, h * px);
+}
+
+function bakeTexture(scene, key, gridW, gridH, px, drawFn) {
+  const g = scene.add.graphics();
+  drawFn(g, px);
+  g.generateTexture(key, gridW * px, gridH * px);
+  g.destroy();
+}
+
+function generateAllTextures(scene) {
+  const c = COL;
+  const circ = (g, px, cx, cy, r, color) => { g.fillStyle(color, 1); g.fillCircle(cx * px, cy * px, r * px); };
+
+  // --- Гравець (літак, ніс вгору), сітка 16x16, px=2 ---
+  bakeTexture(scene, 'player', 16, 16, 2, (g, px) => {
+    P(g, px, 7, 0, 2, 3, c.green);
+    P(g, px, 6, 3, 4, 3, c.green);
+    P(g, px, 7, 2, 2, 2, c.cockpit);
+    P(g, px, 5, 6, 6, 3, c.green);
+    P(g, px, 1, 8, 4, 2, c.greenDark);
+    P(g, px, 11, 8, 4, 2, c.greenDark);
+    P(g, px, 1, 8, 1, 2, c.red);
+    P(g, px, 14, 8, 1, 2, c.red);
+    P(g, px, 6, 9, 4, 3, c.green);
+    P(g, px, 5, 10, 1, 3, c.greenDark);
+    P(g, px, 10, 10, 1, 3, c.greenDark);
+    P(g, px, 7, 12, 2, 2, c.orange);
+  });
+
+  // --- Ворожий гелікоптер (носом вправо за замовчуванням), сітка 24x16, px=2 ---
+  bakeTexture(scene, 'heli', 24, 16, 2, (g, px) => {
+    // диск головного гвинта (розмитий обертанням)
+    P(g, px, 1, 1, 20, 1, c.grayDarker);
+    circ(g, px, 11, 1.5, 1.4, c.grayDarker);
+    // щогла гвинта
+    P(g, px, 10, 2, 2, 3, c.grayDark);
+    // округлий фюзеляж
+    circ(g, px, 12, 8, 4.4, c.red);
+    // кабіна-бульбашка спереду
+    circ(g, px, 17, 8, 3, c.cockpit);
+    circ(g, px, 18, 7, 0.9, c.white);
+    // черево/нижня частина фюзеляжу темнішим тоном
+    P(g, px, 8, 10, 9, 2, c.redDark);
+    // хвостова балка, що звужується
+    P(g, px, 2, 8, 7, 2, c.redDark);
+    P(g, px, 0, 8.5, 3, 1, c.redDark);
+    // кіль та хвостовий гвинт
+    P(g, px, 0, 3, 1, 7, c.grayDark);
+    P(g, px, 0, 1, 3, 1, c.grayDarker);
+    circ(g, px, 1, 6, 1, c.grayDark);
+    // полози шасі
+    P(g, px, 9, 13, 10, 1, c.grayDark);
+    P(g, px, 10, 11, 1, 3, c.grayDark);
+    P(g, px, 17, 11, 1, 3, c.grayDark);
+  });
+
+  // --- Ворожий корабель, сітка 26x14, px=2 ---
+  bakeTexture(scene, 'ship', 26, 14, 2, (g, px) => {
+    P(g, px, 2, 7, 22, 4, c.grayDark);
+    P(g, px, 0, 8, 2, 2, c.grayDark);
+    P(g, px, 24, 8, 2, 2, c.grayDark);
+    P(g, px, 4, 5, 18, 2, c.gray);
+    P(g, px, 9, 2, 8, 3, c.tan);
+    P(g, px, 12, 0, 2, 2, c.grayDarker);
+    P(g, px, 2, 11, 22, 1, c.waterBlue);
+  });
+
+  // --- Ворожий реактивний літак (ніс вправо), сітка 20x10, px=2 ---
+  bakeTexture(scene, 'jet', 20, 10, 2, (g, px) => {
+    P(g, px, 0, 4, 14, 2, c.gray);
+    P(g, px, 14, 3, 4, 4, c.grayDark);
+    P(g, px, 18, 4, 2, 2, c.red);
+    P(g, px, 10, 3, 3, 2, c.cockpit);
+    P(g, px, 4, 1, 6, 2, c.grayDark);
+    P(g, px, 4, 7, 6, 2, c.grayDark);
+    P(g, px, 0, 2, 3, 1, c.grayDarker);
+    P(g, px, 0, 7, 3, 1, c.grayDarker);
+  });
+
+  // --- Танк (дулом вправо), сітка 18x12, px=2 ---
+  bakeTexture(scene, 'tank', 18, 12, 2, (g, px) => {
+    // гусениці
+    P(g, px, 1, 8, 15, 3, c.grayDarker);
+    for (let i = 1; i < 15; i += 3) P(g, px, i, 8, 2, 3, c.grayDark);
+    // корпус
+    P(g, px, 2, 4, 12, 5, c.tankBody);
+    P(g, px, 1, 6, 14, 2, c.tankDark);
+    // башта
+    circ(g, px, 8, 4, 3.4, c.tankBody);
+    P(g, px, 6, 2, 5, 3, c.tankDark);
+    // дуло (дивиться вправо — у бік річки для танка на лівому березі)
+    P(g, px, 11, 3, 7, 1.4, c.tankBarrel);
+  });
+
+  // --- Снаряд танка, сітка 6x6, px=2 ---
+  bakeTexture(scene, 'tankShell', 6, 6, 2, (g, px) => {
+    circ(g, px, 3, 3, 2, c.orange);
+    circ(g, px, 3, 3, 1, c.exploYellow);
+  });
+
+  // --- Веселкова повітряна куля-бонус (з кошиком), сітка 18x19, px=2 ---
+  bakeTexture(scene, 'balloon', 18, 19, 2, (g, px) => {
+    const widths = [6, 10, 12, 14, 16, 16, 16, 14, 12, 10, 6, 4];
+    const stripes = [c.prideRed, c.prideOrange, c.prideYellow, c.prideGreen, c.prideBlue, c.pridePurple];
+    for (let row = 0; row < widths.length; row++) {
+      const w = widths[row];
+      const color = stripes[Math.floor(row / 2)];
+      P(g, px, (18 - w) / 2, row, w, 1, color);
+    }
+    // мотузки до кошика
+    P(g, px, 6, 12, 1, 3, c.grayDarker);
+    P(g, px, 11, 12, 1, 3, c.grayDarker);
+    // кошик
+    P(g, px, 5, 15, 8, 4, c.basket);
+    P(g, px, 5, 15, 8, 1, c.tankDark);
+  });
+
+  // --- Паливна станція, сітка 26x18, px=2 (ширша, щоб влазив напис FUEL) ---
+  bakeTexture(scene, 'fuel', 26, 18, 2, (g, px) => {
+    P(g, px, 2, 2, 22, 12, c.yellowFuel);
+    P(g, px, 2, 2, 22, 2, c.orange);
+    P(g, px, 2, 12, 22, 2, c.orange);
+    P(g, px, 11, 0, 4, 2, c.grayDark);
+    P(g, px, 0, 14, 26, 3, c.grayDark);
+  });
+
+  // --- Ракета гравця, сітка 4x8, px=3 ---
+  bakeTexture(scene, 'missile', 4, 8, 3, (g, px) => {
+    P(g, px, 1, 0, 2, 6, c.white);
+    P(g, px, 0, 6, 4, 2, c.orange);
+  });
+
+  // --- Кадри вибуху (круглі), сітка 16x16, px=2 ---
+  bakeTexture(scene, 'explo1', 16, 16, 2, (g, px) => {
+    circ(g, px, 8, 8, 3, c.exploYellow);
+  });
+  bakeTexture(scene, 'explo2', 16, 16, 2, (g, px) => {
+    circ(g, px, 8, 8, 6, c.exploOrange);
+    circ(g, px, 8, 8, 3.2, c.exploYellow);
+  });
+  bakeTexture(scene, 'explo3', 16, 16, 2, (g, px) => {
+    circ(g, px, 8, 8, 7.5, c.exploRed);
+    circ(g, px, 8, 8, 5, c.exploOrange);
+    circ(g, px, 8, 8, 3, c.exploYellow);
+    // іскри навколо
+    circ(g, px, 2.5, 4, 1, c.exploYellow);
+    circ(g, px, 13.5, 3.5, 1, c.exploYellow);
+    circ(g, px, 3, 12.5, 1, c.exploYellow);
+    circ(g, px, 13, 13, 1, c.exploYellow);
+  });
+
+  // --- Тайл ферми моста, сітка 16x16, px=2 (тайлиться по горизонталі) ---
+  bakeTexture(scene, 'bridgeTile', 16, 16, 2, (g, px) => {
+    P(g, px, 0, 0, 16, 3, c.bridgeGray);
+    P(g, px, 0, 13, 16, 3, c.bridgeGray);
+    for (let i = 0; i < 16; i += 4) {
+      P(g, px, i, 3, 2, 2, c.bridgeDark);
+      P(g, px, i + 2, 7, 2, 2, c.bridgeDark);
+      P(g, px, i, 11, 2, 2, c.bridgeDark);
+    }
+  });
+
+  // --- Опора мосту (вежа), сітка 8x16, px=2 ---
+  bakeTexture(scene, 'bridgeTower', 8, 16, 2, (g, px) => {
+    P(g, px, 0, 0, 8, 16, c.grayDarker);
+    P(g, px, 2, 2, 4, 12, c.bridgeDark);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// ГЕНЕРАТОР РЕЛЬЄФУ РІЧКИ
+// ---------------------------------------------------------------------------
+class TerrainGen {
+  constructor() {
+    this.centerX = W / 2;
+    this.halfWidth = 150;
+    this.minHalf = 78;
+    this.maxHalf = 195;
+    this.margin = 30;
+
+    // плавність берегів: рухаємо ширину/центр через "швидкість" (інерцію),
+    // а не незалежним випадковим кроком щорядка — так контур виходить
+    // хвилястим, а не рваним/зигзагоподібним
+    this.halfVel = 0;
+    this.centerVel = 0;
+
+    this.islandActive = false;
+    this.islandPhase = null;
+    this.islandHalf = 0;
+    this.islandTargetHalf = 0;
+    this.islandRowsLeft = 0;
+    this.islandCooldown = 90;
+
+    this.distSinceBridge = 0;
+    this.bridgeDistance = 3600;
+    this.bridgeRowsLeft = 0;
+    this.currentBridge = null;
+
+    // дерева/кущі на берегах — декоративні, не впливають на колізії
+    this.decoLeftCooldown = Phaser.Math.Between(4, 12);
+    this.decoRightCooldown = Phaser.Math.Between(4, 12);
+
+    this.level = 1;
+  }
+
+  setLevel(level) {
+    this.level = level;
+    this.minHalf = Math.max(58, 78 - level * 3);
+    this.bridgeDistance = Math.max(2600, 4200 - level * 130);
+  }
+
+  nextRow(scrollDeltaPx) {
+    const frozen = this.bridgeRowsLeft > 0; // під час моста ширина не змінюється
+
+    if (!frozen) {
+      // невеликі випадкові поштовхи міняють не саму позицію, а швидкість —
+      // положення тоді змінюється плавною кривою (як інерція), без різких
+      // зигзагів від рядка до рядка
+      this.halfVel = Phaser.Math.Clamp(this.halfVel + Phaser.Math.FloatBetween(-0.25, 0.25), -1.1, 1.1);
+      this.centerVel = Phaser.Math.Clamp(this.centerVel + Phaser.Math.FloatBetween(-0.3, 0.3), -1.4, 1.4);
+
+      let newHalf = this.halfWidth + this.halfVel;
+      if (newHalf < this.minHalf || newHalf > this.maxHalf) this.halfVel *= -0.4; // м'яко "відбити" від межі
+      this.halfWidth = Phaser.Math.Clamp(newHalf, this.minHalf, this.maxHalf);
+
+      let newCenter = this.centerX + this.centerVel;
+      const centerMin = this.halfWidth + this.margin, centerMax = W - this.halfWidth - this.margin;
+      if (newCenter < centerMin || newCenter > centerMax) this.centerVel *= -0.4;
+      this.centerX = Phaser.Math.Clamp(newCenter, centerMin, centerMax);
+    }
+
+    // --- острови ---
+    let islandLeft = null, islandRight = null;
+    if (!frozen) {
+      if (!this.islandActive) {
+        this.islandCooldown--;
+        if (this.islandCooldown <= 0 && this.halfWidth > 118 && this.bridgeRowsLeft === 0) {
+          this.islandActive = true;
+          this.islandPhase = 'grow';
+          this.islandHalf = 0;
+          this.islandTargetHalf = Phaser.Math.Between(20, Math.max(20, Math.min(58, this.halfWidth - 74)));
+          this.islandRowsLeft = Phaser.Math.Between(45, 85);
+        }
+      }
+      if (this.islandActive) {
+        if (this.islandPhase === 'grow') {
+          this.islandHalf += 3;
+          if (this.islandHalf >= this.islandTargetHalf) { this.islandHalf = this.islandTargetHalf; this.islandPhase = 'hold'; }
+        } else if (this.islandPhase === 'hold') {
+          this.islandRowsLeft--;
+          if (this.islandRowsLeft <= 0) this.islandPhase = 'shrink';
+        } else if (this.islandPhase === 'shrink') {
+          this.islandHalf -= 3;
+          if (this.islandHalf <= 0) {
+            this.islandHalf = 0; this.islandActive = false;
+            this.islandCooldown = Phaser.Math.Between(70, 150);
+          }
+        }
+        if (this.islandActive && this.islandHalf > 4) {
+          islandLeft = this.centerX - this.islandHalf;
+          islandRight = this.centerX + this.islandHalf;
+        }
+      }
+    }
+
+    // --- мости ---
+    let bridgeRef = null;
+    this.distSinceBridge += scrollDeltaPx;
+    if (this.bridgeRowsLeft > 0) {
+      bridgeRef = this.currentBridge;
+      this.bridgeRowsLeft--;
+      if (this.bridgeRowsLeft === 0) this.currentBridge = null;
+    } else if (this.distSinceBridge >= this.bridgeDistance && !this.islandActive) {
+      this.distSinceBridge = 0;
+      this.currentBridge = { hp: 1, alive: true, scored: false, left: this.centerX - this.halfWidth, right: this.centerX + this.halfWidth };
+      this.bridgeRowsLeft = 4;
+      bridgeRef = this.currentBridge;
+      this.bridgeRowsLeft--;
+    }
+
+    // --- дерева/кущі на берегах ---
+    // з'являються з випадковим інтервалом на кожному березі окремо, щоб не
+    // тулитись одне до одного; вимкнено біля мостів і на "заморожених"
+    // рядках, щоб не заважати конструкції моста
+    let decoLeft = null, decoRight = null;
+    if (!frozen && !bridgeRef) {
+      this.decoLeftCooldown--;
+      if (this.decoLeftCooldown <= 0) {
+        decoLeft = { tree: Phaser.Math.Between(0, 1) === 0, inset: Phaser.Math.Between(6, 26) };
+        this.decoLeftCooldown = Phaser.Math.Between(7, 18);
+      }
+      this.decoRightCooldown--;
+      if (this.decoRightCooldown <= 0) {
+        decoRight = { tree: Phaser.Math.Between(0, 1) === 0, inset: Phaser.Math.Between(6, 26) };
+        this.decoRightCooldown = Phaser.Math.Between(7, 18);
+      }
+    }
+
+    return {
+      left: this.centerX - this.halfWidth,
+      right: this.centerX + this.halfWidth,
+      islandLeft, islandRight,
+      bridge: bridgeRef,
+      decoLeft, decoRight
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// BOOT SCENE — генерація текстур
+// ---------------------------------------------------------------------------
+class BootScene extends Phaser.Scene {
+  constructor() { super('Boot'); }
+  create() {
+    generateAllTextures(this);
+    this.scene.start('Title');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TITLE SCENE
+// ---------------------------------------------------------------------------
+class TitleScene extends Phaser.Scene {
+  constructor() { super('Title'); }
+  create() {
+    this.cameras.main.setBackgroundColor('#04122b');
+
+    this.add.text(W / 2, 150, 'RIVER RAID', {
+      fontFamily: 'Courier New, monospace', fontSize: '48px', fontStyle: 'bold',
+      color: '#39ff6a'
+    }).setOrigin(0.5).setShadow(3, 3, '#0a3d17', 0, false, true);
+
+    this.add.image(W / 2, 230, 'player').setScale(3);
+
+    const lines = [
+      '← →  рух літака      ↑ прискорення',
+      '↓ гальмо              SPACE постріл',
+      'P/ESC   пауза',
+      '',
+      'Не врізайся в береги, збивай мости,',
+      'не дай закінчитись пальному.'
+    ];
+    this.add.text(W / 2, 300, lines, {
+      fontFamily: 'Courier New, monospace', fontSize: '16px', color: '#cfe8ff', align: 'center'
+    }).setOrigin(0.5);
+
+    this.add.text(W / 2, 372, 'Збий веселкову кульку — отримай бонус!', {
+      fontFamily: 'Courier New, monospace', fontSize: '14px', color: '#ffd6f5'
+    }).setOrigin(0.5);
+    this.add.image(W / 2 - 110, 425, 'balloon').setScale(1.3);
+    this.add.text(W / 2 - 65, 400, [
+      'T — потрійний вогонь',
+      'M — самонаведення',
+      'D — швидкий вогонь',
+      'F — паливо на повний бак',
+      'N — знищує всіх ворогів',
+      'X — додаткове життя'
+    ], {
+      fontFamily: 'Courier New, monospace', fontSize: '13px', color: '#cfe8ff', align: 'left', lineSpacing: 3
+    }).setOrigin(0, 0);
+
+    this.blink = this.add.text(W / 2, 600, 'PRESS SPACE TO START', {
+      fontFamily: 'Courier New, monospace', fontSize: '20px', fontStyle: 'bold', color: '#ffe066'
+    }).setOrigin(0.5);
+
+    this.tweens.add({ targets: this.blink, alpha: 0.15, duration: 550, yoyo: true, repeat: -1 });
+
+    const start = () => { SFX.ensure(); this.scene.start('Game'); };
+    this.input.keyboard.once('keydown-SPACE', start);
+    this.input.keyboard.once('keydown-ENTER', start);
+    this.input.once('pointerdown', start);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GAME SCENE
+// ---------------------------------------------------------------------------
+class GameScene extends Phaser.Scene {
+  constructor() { super('Game'); }
+
+  create() {
+    this.cameras.main.setBackgroundColor('#1560c4');
+
+    // --- стан гри ---
+    this.state = 'playing';           // playing | paused | gameover
+    this.score = 0;
+    this.lives = 3;
+    this.level = 1;
+    this.fuel = FUEL_MAX;
+    this.nextExtraLife = EXTRA_LIFE_STEP;
+    this.scrollSpeed = CRUISE_SPEED;
+    this.minSpeed = MIN_SPEED;
+    this.maxSpeed = BASE_MAX_SPEED;
+    this.scrollAccum = 0;
+    this.invulnTimer = INVULN_TIME;
+    this.levelFlashTimer = 0;
+
+    // --- рельєф ---
+    this.terrainGen = new TerrainGen();
+    this.terrainGen.setLevel(this.level);
+    this.rows = [];
+    for (let i = 0; i < ROWS_COUNT; i++) this.rows.unshift(this.terrainGen.nextRow(ROW_H));
+    this.terrainGfx = this.add.graphics();
+    this.bridgeVisuals = new Map(); // bridge obj -> {tiles:[Image], towers:[Image]}
+
+    // --- гравець ---
+    this.player = this.add.image(W / 2, PLAYER_Y, 'player').setScale(1.4);
+    this.player.setDepth(10);
+
+    // --- сутності ---
+    this.enemies = [];      // {img, type, vx, x, y, alive}
+    this.fuels = [];        // {img, x, y, alive}
+    this.tanks = [];        // танки на березі {img, side, x, y, fireTimer}
+    this.tankBullets = [];  // снаряди танків {img, x, y, vx, vy}
+    this.balloons = [];     // бонусні кульки {img, label, letter, x, y}
+    this.missiles = [];     // ракети гравця {img, x, y, vx, vy, homing, target}
+    this.explosions = [];
+    this.activePower = null; // null | 'triple' | 'missile' | 'double'
+
+    this.enemyTimer = 1.6;
+    this.fuelTimer = 1.6;
+    this.tankTimer = 3.5;
+    this.balloonTimer = 6.0;
+
+    // --- керування ---
+    this.cursors = this.input.keyboard.createCursorKeys();
+    this.keys = this.input.keyboard.addKeys('SPACE,P,ESC,ENTER');
+    this.spaceLock = false;
+
+    // --- HUD ---
+    const hudStyle = { fontFamily: 'Courier New, monospace', fontSize: '18px', color: '#39ff6a', fontStyle: 'bold' };
+    this.scoreText = this.add.text(10, 8, 'SCORE 0', hudStyle).setDepth(30);
+    this.levelText = this.add.text(W - 10, 8, 'LEVEL 1', hudStyle).setOrigin(1, 0).setDepth(30);
+    this.livesText = this.add.text(10, 30, '', hudStyle).setDepth(30);
+    this.powerText = this.add.text(W / 2, 8, '', {
+      fontFamily: 'Courier New, monospace', fontSize: '15px', fontStyle: 'bold', color: '#ff6ad5'
+    }).setOrigin(0.5, 0).setDepth(30);
+    this.fuelLabel = this.add.text(10, H - 26, 'FUEL', { fontFamily: 'Courier New, monospace', fontSize: '14px', color: '#cfe8ff' }).setDepth(30);
+    this.fuelBarBg = this.add.rectangle(58, H - 20, 200, 14, 0x223344).setOrigin(0, 0.5).setDepth(30).setStrokeStyle(2, 0x0a1a2a);
+    this.fuelBarFill = this.add.rectangle(60, H - 20, 196, 10, 0xffcc00).setOrigin(0, 0.5).setDepth(30);
+
+    this.centerMsg = this.add.text(W / 2, H / 2, '', {
+      fontFamily: 'Courier New, monospace', fontSize: '30px', fontStyle: 'bold', color: '#ffffff', align: 'center'
+    }).setOrigin(0.5).setDepth(40).setShadow(2, 2, '#000', 0, true, true);
+    this.subMsg = this.add.text(W / 2, H / 2 + 46, '', {
+      fontFamily: 'Courier New, monospace', fontSize: '18px', color: '#ffe066', align: 'center'
+    }).setOrigin(0.5).setDepth(40);
+
+    this.updateHUD();
+  }
+
+  // -------------------------------------------------------------------
+  updateHUD() {
+    this.scoreText.setText('SCORE ' + this.score);
+    this.levelText.setText('LEVEL ' + this.level);
+    this.livesText.setText('LIVES ' + Math.max(0, this.lives));
+    const powerNames = { triple: 'TRIPLE ★', missile: 'HOMING ★', double: 'DOUBLE ★' };
+    this.powerText.setText(this.activePower ? powerNames[this.activePower] : '');
+    const frac = Phaser.Math.Clamp(this.fuel / FUEL_MAX, 0, 1);
+    this.fuelBarFill.width = 196 * frac;
+    this.fuelBarFill.fillColor = frac < 0.25 ? 0xe03c3c : 0xffcc00;
+  }
+
+  rowAtScreenY(y) {
+    const idx = Math.round((y - this.scrollAccum) / ROW_H);
+    return this.rows[Phaser.Math.Clamp(idx, 0, this.rows.length - 1)];
+  }
+
+  isChannelSafe(row, x, halfW) {
+    if (row.bridge && row.bridge.alive) return false;
+    if (row.islandLeft != null) {
+      const leftOk = (x - halfW > row.left) && (x + halfW < row.islandLeft);
+      const rightOk = (x - halfW > row.islandRight) && (x + halfW < row.right);
+      return leftOk || rightOk;
+    }
+    return (x - halfW > row.left) && (x + halfW < row.right);
+  }
+
+  // -------------------------------------------------------------------
+  update(time, delta) {
+    const dt = Math.min(delta / 1000, 0.05);
+
+    if (this.state === 'title-unused') return;
+
+    if (Phaser.Input.Keyboard.JustDown(this.keys.P) || Phaser.Input.Keyboard.JustDown(this.keys.ESC)) {
+      if (this.state === 'playing') this.pauseGame();
+      else if (this.state === 'paused') this.resumeGame();
+    }
+
+    if (this.state === 'gameover') {
+      if (Phaser.Input.Keyboard.JustDown(this.keys.SPACE) || Phaser.Input.Keyboard.JustDown(this.keys.ENTER)) {
+        this.scene.restart();
+      }
+      return;
+    }
+
+    if (this.state === 'paused') return;
+
+    this.updatePlaying(dt);
+  }
+
+  pauseGame() {
+    this.state = 'paused';
+    this.centerMsg.setText('PAUSE');
+    this.subMsg.setText('P / ESC — продовжити');
+  }
+  resumeGame() {
+    this.state = 'playing';
+    this.centerMsg.setText('');
+    this.subMsg.setText('');
+  }
+
+  // -------------------------------------------------------------------
+  updatePlaying(dt) {
+    // керування газом
+    if (this.cursors.up.isDown) this.scrollSpeed = Math.min(this.maxSpeed, this.scrollSpeed + THROTTLE_ACCEL * dt);
+    else if (this.cursors.down.isDown) this.scrollSpeed = Math.max(this.minSpeed, this.scrollSpeed - THROTTLE_ACCEL * dt);
+
+    const scrollDelta = this.scrollSpeed * dt;
+    this.scrollAccum += scrollDelta;
+    while (this.scrollAccum >= ROW_H) {
+      this.scrollAccum -= ROW_H;
+      this.rows.pop();
+      const newRow = this.terrainGen.nextRow(ROW_H);
+      this.rows.unshift(newRow);
+      if (newRow.bridge && !newRow.bridge._spawned) {
+        newRow.bridge._spawned = true;
+        this.spawnBridgeVisual(newRow.bridge);
+      }
+    }
+
+    // бічний рух гравця (керування доступне завжди, недоторканність впливає лише на колізії)
+    let bankTarget = 0;
+    if (this.cursors.left.isDown) { this.player.x -= PLAYER_SPEED_X * dt; bankTarget = -24; }
+    if (this.cursors.right.isDown) { this.player.x += PLAYER_SPEED_X * dt; bankTarget = 24; }
+    this.player.x = Phaser.Math.Clamp(this.player.x, 6, W - 6);
+    // плавний крен "на крило" при повороті, як в оригіналі
+    this.player.angle = Phaser.Math.Linear(this.player.angle, bankTarget, Math.min(1, dt * 12));
+
+    // паливо
+    const speedFrac = (this.scrollSpeed - this.minSpeed) / (this.maxSpeed - this.minSpeed);
+    this.fuel -= (FUEL_DRAIN_BASE + (FUEL_DRAIN_MAX - FUEL_DRAIN_BASE) * speedFrac) * dt;
+    if (this.fuel <= 0) {
+      this.fuel = 0;
+      this.crashPlayer();
+    }
+
+    if (this.invulnTimer > 0) {
+      this.invulnTimer -= dt;
+      this.player.setAlpha(Math.floor(this.invulnTimer * 10) % 2 === 0 ? 0.3 : 1);
+      if (this.invulnTimer <= 0) this.player.setAlpha(1);
+    }
+
+    if (this.levelFlashTimer > 0) {
+      this.levelFlashTimer -= dt;
+      if (this.levelFlashTimer <= 0) { this.centerMsg.setText(''); this.subMsg.setText(''); }
+    }
+
+    this.drawTerrain();
+    this.updateBridgeVisuals(scrollDelta, dt);
+    this.updateEnemies(scrollDelta, dt);
+    this.updateFuels(scrollDelta, dt);
+    this.updateTanks(scrollDelta, dt);
+    this.updateTankBullets(dt);
+    this.updateBalloons(scrollDelta, dt);
+    this.updateSpawners(dt);
+    this.updateMissiles(dt);
+    this.updateExplosions(dt);
+    this.handleShooting();
+    this.checkPlayerCollisions();
+
+    this.updateHUD();
+  }
+
+  // -------------------------------------------------------------------
+  drawTerrain() {
+    const g = this.terrainGfx;
+    g.clear();
+    g.fillStyle(COL.landGreen, 1);
+    for (let i = 0; i < this.rows.length; i++) {
+      const row = this.rows[i];
+      const y = i * ROW_H + this.scrollAccum;
+      if (y > H + ROW_H || y < -ROW_H * 2) continue;
+      g.fillRect(0, y, row.left, ROW_H + 1);
+      g.fillRect(row.right, y, W - row.right, ROW_H + 1);
+      if (row.islandLeft != null) {
+        g.fillRect(row.islandLeft, y, row.islandRight - row.islandLeft, ROW_H + 1);
+      }
+    }
+    // дерева/кущі — окремим проходом ПІСЛЯ всього суходолу, щоб їх не
+    // "затирали" рядки землі, намальовані нижче по потоку
+    for (let i = 0; i < this.rows.length; i++) {
+      const row = this.rows[i];
+      const y = i * ROW_H + this.scrollAccum;
+      if (y > H + 24 || y < -28) continue;
+      if (row.decoLeft) {
+        const dx = row.left - row.decoLeft.inset;
+        if (row.decoLeft.tree) this.drawTree(g, dx, y); else this.drawBush(g, dx, y);
+      }
+      if (row.decoRight) {
+        const dx = row.right + row.decoRight.inset;
+        if (row.decoRight.tree) this.drawTree(g, dx, y); else this.drawBush(g, dx, y);
+      }
+    }
+    // тонка світліша лінія на межі берега для контрасту (косметика)
+    g.lineStyle(1, COL.landGreenEdge, 0.5);
+  }
+
+  // невелике "дерево" — стовбур + крона з кількох кіл для об'єму
+  drawTree(g, x, y) {
+    g.fillStyle(COL.brown, 1);
+    g.fillRect(x - 1, y + 6, 3, 9);
+    g.fillStyle(COL.greenDarker, 1);
+    g.fillCircle(x, y + 4, 7);
+    g.fillStyle(COL.greenDark, 1);
+    g.fillCircle(x - 3, y + 2, 5);
+    g.fillCircle(x + 3, y + 3, 4);
+    g.fillStyle(COL.green, 1);
+    g.fillCircle(x - 1, y, 3);
+  }
+
+  // невеликий "кущ" — без стовбура, нижче й ширше дерева
+  drawBush(g, x, y) {
+    g.fillStyle(COL.greenDarker, 1);
+    g.fillCircle(x, y + 3, 5);
+    g.fillStyle(COL.greenDark, 1);
+    g.fillCircle(x - 3, y + 4, 4);
+    g.fillCircle(x + 3, y + 4, 4);
+    g.fillStyle(COL.green, 1);
+    g.fillCircle(x, y + 2, 2);
+  }
+
+  spawnBridgeVisual(bridge) {
+    // рухаємо міст тим самим неперервним скролом, що й інші сутності —
+    // це прибирає "сіпання", яке було при прив'язці до індексу рядка рельєфу.
+    bridge.visualY = this.scrollAccum + ROW_H * 1.5;
+    const width = bridge.right - bridge.left;
+    const tileImg = this.add.tileSprite(bridge.left, bridge.visualY, width, 16, 'bridgeTile').setOrigin(0, 0.5).setDepth(5);
+    const towerL = this.add.image(bridge.left, bridge.visualY, 'bridgeTower').setOrigin(1, 0.5).setDepth(6);
+    const towerR = this.add.image(bridge.right, bridge.visualY, 'bridgeTower').setOrigin(0, 0.5).setDepth(6).setFlipX(true);
+    this.bridgeVisuals.set(bridge, { tileImg, towerL, towerR, bridge });
+
+    // танк, що переїжджає міст — якщо встигнути знищити міст поки танк на ньому, очки потроюються
+    if (width > 70) {
+      bridge.tankAlive = true;
+      bridge.tankProgress = 0;
+      bridge.tankDir = Phaser.Math.Between(0, 1) === 0 ? 1 : -1;
+      bridge.tankStartX = bridge.tankDir === 1 ? bridge.left + 16 : bridge.right - 16;
+      bridge.tankEndX = bridge.tankDir === 1 ? bridge.right - 16 : bridge.left + 16;
+      bridge.tankSpeed = 42;
+      const tankImg = this.add.image(bridge.tankStartX, bridge.visualY - 7, 'tank').setDepth(7).setScale(1.1);
+      tankImg.setFlipX(bridge.tankDir === -1);
+      bridge.tankImg = tankImg;
+    } else {
+      bridge.tankAlive = false;
+      bridge.tankImg = null;
+    }
+  }
+
+  updateBridgeVisuals(scrollDelta, dt) {
+    for (const [bridge, v] of this.bridgeVisuals) {
+      bridge.visualY += scrollDelta;
+      v.tileImg.y = bridge.visualY; v.towerL.y = bridge.visualY; v.towerR.y = bridge.visualY;
+      if (!bridge.alive) {
+        v.tileImg.setAlpha(0.25);
+        v.towerL.setAlpha(0.25);
+        v.towerR.setAlpha(0.25);
+      }
+
+      if (bridge.tankAlive && bridge.tankImg) {
+        const span = Math.max(1, Math.abs(bridge.tankEndX - bridge.tankStartX));
+        bridge.tankProgress += (bridge.tankSpeed * dt) / span;
+        if (bridge.tankProgress >= 1) {
+          // танк доїхав до кінця мосту і втік — бонус більше не отримати
+          bridge.tankProgress = 1;
+          bridge.tankAlive = false;
+          bridge.tankImg.destroy();
+          bridge.tankImg = null;
+        } else {
+          bridge.tankImg.x = Phaser.Math.Linear(bridge.tankStartX, bridge.tankEndX, bridge.tankProgress);
+          bridge.tankImg.y = bridge.visualY - 7;
+        }
+      }
+
+      if (bridge.visualY > H + 40) {
+        v.tileImg.destroy(); v.towerL.destroy(); v.towerR.destroy();
+        if (bridge.tankImg) bridge.tankImg.destroy();
+        this.bridgeVisuals.delete(bridge);
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------
+  spawnEnemy() {
+    const row = this.rows[3];
+    if (!row) return;
+    // трохи більше шансу на швидкий проліт ворожого літака (jet)
+    const roll = Math.random();
+    const type = roll < 0.32 ? 'heli' : roll < 0.6 ? 'ship' : 'jet';
+
+    // не більше 3 ворогів кожного типу одночасно на екрані (щоб не рябіло на малій швидкості)
+    const countOfType = this.enemies.reduce((n, e) => n + (e.type === type ? 1 : 0), 0);
+    if (countOfType >= 3) return;
+
+    let x0, x1;
+    if (row.islandLeft != null && Phaser.Math.Between(0, 1) === 0) {
+      x0 = row.left + 16; x1 = row.islandLeft - 16;
+    } else if (row.islandLeft != null) {
+      x0 = row.islandRight + 16; x1 = row.right - 16;
+    } else {
+      x0 = row.left + 16; x1 = row.right - 16;
+    }
+    if (x1 - x0 < 20) return;
+    const x = Phaser.Math.Between(x0, x1);
+    const y = -20;
+
+    const img = this.add.image(x, y, type).setDepth(8);
+    let vx = 0;
+    if (type === 'jet') {
+      const fromLeft = Phaser.Math.Between(0, 1) === 0;
+      img.x = fromLeft ? -20 : W + 20;
+      img.setFlipX(!fromLeft);
+      vx = fromLeft ? 190 : -190;
+    } else if (type === 'heli') {
+      vx = 0;
+    } else if (type === 'ship') {
+      vx = 0;
+    }
+    const enemy = { img, type, x: img.x, y, vx, phase: Math.random() * Math.PI * 2, alive: true, dir: Phaser.Math.Between(0, 1) === 0 ? 1 : -1 };
+    this.enemies.push(enemy);
+  }
+
+  spawnFuel() {
+    const row = this.rows[3];
+    if (!row) return;
+    let x0, x1;
+    if (row.islandLeft != null && Phaser.Math.Between(0, 1) === 0) {
+      x0 = row.left + 14; x1 = row.islandLeft - 14;
+    } else if (row.islandLeft != null) {
+      x0 = row.islandRight + 14; x1 = row.right - 14;
+    } else {
+      x0 = row.left + 14; x1 = row.right - 14;
+    }
+    if (x1 - x0 < 16) return;
+    const x = Phaser.Math.Between(x0, x1);
+    const img = this.add.image(x, -20, 'fuel').setDepth(7);
+    const label = this.add.text(x, -20, 'FUEL', {
+      fontFamily: 'Courier New, monospace', fontSize: '10px', fontStyle: 'bold', color: '#5a3d00'
+    }).setOrigin(0.5).setDepth(8);
+    this.fuels.push({ img, label, x, y: -20, alive: true });
+  }
+
+  spawnShoreTank() {
+    if (this.tanks.length >= 2) return; // не даємо танкам накопичуватись на екрані
+    const row = this.rows[3];
+    if (!row || row.bridge) return;
+    const side = Phaser.Math.Between(0, 1) === 0 ? 'left' : 'right';
+    // танк заїжджає з того краю екрана, з якого боку його берег
+    const startX = side === 'left' ? 0 : W;
+    const img = this.add.image(startX, -20, 'tank').setDepth(4);
+    if (side === 'right') img.setFlipX(true);
+    this.tanks.push({
+      img, side, x: startX, y: -20,
+      // пряме посилання на "свій" рядок берега (left/right/decoLeft/decoRight
+      // в ньому незмінні після створення) — надійніше за повторний пошук
+      // через rowAtScreenY(t.y), бо той при від'ємному y (танк ще над
+      // екраном) клампиться на "поточний" rows[0], який щокадру змінюється,
+      // поки не з'явиться перший стабільний рядок
+      row,
+      atBank: false, // стріляє лише коли реально доїхав до берега
+      fireTimer: Phaser.Math.FloatBetween(2.0, 3.4)
+    });
+  }
+
+  updateSpawners(dt) {
+    const diffFactor = Math.min(1, this.level / 8);
+    this.enemyTimer -= dt;
+    if (this.enemyTimer <= 0) {
+      this.spawnEnemy();
+      this.enemyTimer = Phaser.Math.FloatBetween(1.5 - diffFactor * 0.9, 2.6 - diffFactor * 1.2);
+      this.enemyTimer = Math.max(0.55, this.enemyTimer);
+    }
+    this.fuelTimer -= dt;
+    if (this.fuelTimer <= 0) {
+      this.spawnFuel();
+      this.fuelTimer = Phaser.Math.FloatBetween(2.75, 4.25); // вдвічі частіше, ніж раніше
+    }
+    this.tankTimer -= dt;
+    if (this.tankTimer <= 0) {
+      this.spawnShoreTank();
+      this.tankTimer = Phaser.Math.FloatBetween(8.5 - diffFactor * 2.0, 13 - diffFactor * 3.0);
+      this.tankTimer = Math.max(5.5, this.tankTimer);
+    }
+    this.balloonTimer -= dt;
+    if (this.balloonTimer <= 0) {
+      this.spawnBalloon();
+      this.balloonTimer = Phaser.Math.FloatBetween(11, 17);
+    }
+  }
+
+  updateEnemies(scrollDelta, dt) {
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      const e = this.enemies[i];
+      if (!e.alive) continue;
+      e.y += scrollDelta;
+      if (e.type === 'heli') {
+        e.phase += dt * 2;
+        const vx = Math.cos(e.phase) * 40;
+        e.x += vx * dt;
+        e.img.setFlipX(vx < 0);
+      } else if (e.type === 'ship') {
+        e.phase += dt;
+        e.x += e.dir * 26 * dt;
+        if (e.phase > 2.4) { e.dir *= -1; e.phase = 0; }
+      } else if (e.type === 'jet') {
+        e.x += e.vx * dt;
+      }
+      e.img.x = e.x;
+      e.img.y = e.y;
+
+      if (e.y > H + 40 || e.x < -60 || e.x > W + 60) {
+        e.img.destroy();
+        this.enemies.splice(i, 1);
+      }
+    }
+  }
+
+  updateFuels(scrollDelta, dt) {
+    for (let i = this.fuels.length - 1; i >= 0; i--) {
+      const f = this.fuels[i];
+      f.y += scrollDelta;
+      f.img.y = f.y;
+      f.label.y = f.y;
+      if (f.y > H + 40) { f.img.destroy(); f.label.destroy(); this.fuels.splice(i, 1); continue; }
+
+      // рефueling: гравець над станцією
+      if (f.alive && this.invulnTimer <= 0) {
+        const dx = Math.abs(this.player.x - f.x);
+        const dy = Math.abs(PLAYER_Y - f.y);
+        if (dx < 22 && dy < 20 && this.fuel < FUEL_MAX) {
+          this.fuel = Math.min(FUEL_MAX, this.fuel + FUEL_REFILL_RATE * dt);
+          if (Math.random() < 0.06) SFX.fuel();
+        }
+      }
+    }
+  }
+
+  updateTanks(scrollDelta, dt) {
+    const DRIVE_SPEED = 60; // px/сек — швидкість заїзду від краю екрана до берега
+    const TREE_CLEARANCE = 20; // px — на скільки танк зупиняється, не доїжджаючи до дерева
+
+    for (let i = this.tanks.length - 1; i >= 0; i--) {
+      const t = this.tanks[i];
+      t.y += scrollDelta;
+      if (t.y > H + 40) { t.img.destroy(); this.tanks.splice(i, 1); continue; }
+
+      // фіксований рядок, збережений при спавні (left/right/decoLeft/decoRight
+      // в ньому не змінюються) — навмисно НЕ шукаємо через rowAtScreenY(t.y)
+      // щокадру: біля від'ємного y це клампиться на "поточний" rows[0], який
+      // щокадру змінюється, поки не з'явиться перший стабільний рядок, і
+      // дерево, поставлене на "свій" рядок, могло взагалі не збігтися
+      const row = t.row;
+      if (row) {
+        const bankX = t.side === 'left' ? row.left - 12 : row.right + 12;
+        let targetX = bankX;
+
+        // якщо на шляху від краю екрана до берега стоїть дерево — доїжджаємо
+        // тільки до нього і застрягаємо там назавжди (доки танк не зникне)
+        const deco = t.side === 'left' ? row.decoLeft : row.decoRight;
+        if (deco && deco.tree) {
+          const treeX = t.side === 'left' ? row.left - deco.inset : row.right + deco.inset;
+          const blocked = t.side === 'left' ? (treeX < bankX) : (treeX > bankX);
+          if (blocked) {
+            let stopX = t.side === 'left' ? treeX - TREE_CLEARANCE : treeX + TREE_CLEARANCE;
+            stopX = t.side === 'left' ? Math.max(0, stopX) : Math.min(W, stopX);
+            targetX = stopX;
+          }
+        }
+
+        if (t.side === 'left') t.x = Math.min(targetX, t.x + DRIVE_SPEED * dt);
+        else t.x = Math.max(targetX, t.x - DRIVE_SPEED * dt);
+        t.img.x = t.x;
+        t.img.y = t.y;
+
+        // "доїхав" вважається лише якщо реально дістався берега, а не
+        // зупинився перед деревом
+        t.atBank = Math.abs(t.x - bankX) < 1;
+      }
+
+      if (t.atBank && t.y > 0 && t.y < H) {
+        t.fireTimer -= dt;
+        if (t.fireTimer <= 0) {
+          this.fireTankShell(t);
+          const diffFactor = Math.min(1, this.level / 8);
+          t.fireTimer = Phaser.Math.FloatBetween(3.2 - diffFactor * 1.0, 5.0 - diffFactor * 1.4);
+          t.fireTimer = Math.max(1.8, t.fireTimer);
+        }
+      }
+    }
+  }
+
+  fireTankShell(t) {
+    // як в оригіналі: постріл летить прямо через річку до протилежного берега,
+    // а не прицілюється в літак — ухилятись можна, змістившись по горизонталі.
+    // vy ЗАВЖДИ 0 і ніде більше не змінюється (updateTankBullets теж не додає
+    // скрол до .y) — постріл виключно горизонтальний, без жодного відхилення.
+    const speed = 200;
+    const vx = t.side === 'left' ? speed : -speed;
+    const img = this.add.image(t.x, t.y, 'tankShell').setDepth(9);
+    this.tankBullets.push({ img, x: t.x, y: t.y, vx, vy: 0 });
+    SFX.tankShot();
+  }
+
+  updateTankBullets(dt) {
+    for (let i = this.tankBullets.length - 1; i >= 0; i--) {
+      const b = this.tankBullets[i];
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      b.img.x = b.x;
+      b.img.y = b.y;
+
+      if (b.x < -20 || b.x > W + 20 || b.y < -20 || b.y > H + 20) {
+        b.img.destroy();
+        this.tankBullets.splice(i, 1);
+        continue;
+      }
+
+      if (this.invulnTimer <= 0 && Math.abs(b.x - this.player.x) < 11 && Math.abs(b.y - PLAYER_Y) < 13) {
+        b.img.destroy();
+        this.tankBullets.splice(i, 1);
+        this.crashPlayer();
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------
+  spawnBalloon() {
+    const row = this.rows[3];
+    if (!row) return;
+    let x0, x1;
+    if (row.islandLeft != null && Phaser.Math.Between(0, 1) === 0) {
+      x0 = row.left + 16; x1 = row.islandLeft - 16;
+    } else if (row.islandLeft != null) {
+      x0 = row.islandRight + 16; x1 = row.right - 16;
+    } else {
+      x0 = row.left + 16; x1 = row.right - 16;
+    }
+    if (x1 - x0 < 20) return;
+    const x = Phaser.Math.Between(x0, x1);
+
+    // T/M/D частіше, F трохи рідше, N (ядерка) і X (життя) — рідкісний джекпот
+    const pool = ['T', 'T', 'M', 'M', 'D', 'D', 'F', 'F', 'N', 'X'];
+    const letter = pool[Phaser.Math.Between(0, pool.length - 1)];
+
+    const img = this.add.image(x, -24, 'balloon').setDepth(7);
+    const label = this.add.text(x, -30, letter, {
+      fontFamily: 'Courier New, monospace', fontSize: '13px', fontStyle: 'bold', color: '#ffffff', stroke: '#000000', strokeThickness: 3
+    }).setOrigin(0.5).setDepth(8);
+    this.balloons.push({ img, label, letter, x, y: -24, phase: Math.random() * Math.PI * 2 });
+  }
+
+  updateBalloons(scrollDelta, dt) {
+    for (let i = this.balloons.length - 1; i >= 0; i--) {
+      const b = this.balloons[i];
+      b.y += scrollDelta;
+      b.phase += dt;
+      b.x += Math.sin(b.phase) * 8 * dt;
+      b.img.x = b.x; b.img.y = b.y;
+      b.label.x = b.x; b.label.y = b.y - 6;
+
+      if (b.y > H + 40) {
+        b.img.destroy(); b.label.destroy();
+        this.balloons.splice(i, 1);
+      }
+    }
+  }
+
+  collectBalloon(b, idx) {
+    const letter = b.letter;
+    this.addScore(40);
+    this.spawnExplosion(b.x, b.y);
+    b.img.destroy();
+    b.label.destroy();
+    this.balloons.splice(idx, 1);
+
+    if (letter === 'F') {
+      this.fuel = FUEL_MAX;
+      SFX.fuel();
+    } else if (letter === 'N') {
+      this.nukeAllEnemies();
+    } else if (letter === 'X') {
+      this.lives++;
+      SFX.extraLife();
+    } else {
+      this.activePower = letter === 'T' ? 'triple' : letter === 'M' ? 'missile' : 'double';
+      SFX.life();
+    }
+  }
+
+  nukeAllEnemies() {
+    for (const e of this.enemies) {
+      this.spawnExplosion(e.x, e.y);
+      e.img.destroy();
+      this.addScore({ heli: 60, ship: 30, jet: 100 }[e.type] || 50);
+    }
+    this.enemies = [];
+    for (const t of this.tanks) {
+      this.spawnExplosion(t.x, t.y);
+      t.img.destroy();
+      this.addScore(70);
+    }
+    this.tanks = [];
+    for (const b of this.tankBullets) b.img.destroy();
+    this.tankBullets = [];
+    SFX.explode();
+  }
+
+  handleShooting() {
+    if (!Phaser.Input.Keyboard.JustDown(this.keys.SPACE)) return;
+
+    if (this.activePower === 'double') {
+      if (this.missiles.length >= 2) return;
+      this.spawnMissile(0, -MISSILE_SPEED, true);
+    } else if (this.activePower === 'triple') {
+      if (this.missiles.length > 0) return;
+      this.spawnMissile(0, -MISSILE_SPEED, true);   // звичайний постріл вперед
+      this.spawnMissile(-MISSILE_SPEED, 0, false);  // спеціальний вліво
+      this.spawnMissile(MISSILE_SPEED, 0, false);   // спеціальний вправо
+    } else if (this.activePower === 'missile') {
+      if (this.missiles.length > 0) return;
+      this.spawnMissile(0, -MISSILE_SPEED, true);   // звичайний постріл залишається
+      this.spawnHomingMissile(-1);                  // + самонавідні з боків
+      this.spawnHomingMissile(1);
+    } else {
+      if (this.missiles.length > 0) return;
+      this.spawnMissile(0, -MISSILE_SPEED, true);
+    }
+    SFX.shoot();
+  }
+
+  spawnMissile(vx, vy, isNormal = true) {
+    const sideways = vx !== 0;
+    const offsetX = sideways ? (vx < 0 ? -13 : 13) : 0;
+    const startX = this.player.x + offsetX;
+    const startY = sideways ? PLAYER_Y - 4 : PLAYER_Y - 20;
+    const img = this.add.image(startX, startY, 'missile').setDepth(9);
+    if (sideways) img.setAngle(vx < 0 ? -90 : 90);
+    this.missiles.push({ img, x: startX, y: startY, vx, vy, homing: false, target: null, normal: isNormal });
+  }
+
+  spawnHomingMissile(side) {
+    const startX = this.player.x + side * 13;
+    const startY = PLAYER_Y - 8;
+    const target = this.findNearestTarget(startX, startY);
+    let vx = 0, vy = -MISSILE_SPEED;
+    if (target) {
+      const d = Math.max(1, Math.hypot(target.x - startX, target.y - startY));
+      vx = (target.x - startX) / d * MISSILE_SPEED;
+      vy = (target.y - startY) / d * MISSILE_SPEED;
+    }
+    const img = this.add.image(startX, startY, 'missile').setDepth(9);
+    img.rotation = Math.atan2(vy, vx) + Math.PI / 2;
+    // самонавідні ракети — спеціальна зброя, кулі-бонуси не чіпають
+    this.missiles.push({ img, x: startX, y: startY, vx, vy, homing: true, target, normal: false });
+  }
+
+  findNearestTarget(x, y) {
+    let best = null, bestDist = Infinity;
+    for (const e of this.enemies) {
+      const d = Phaser.Math.Distance.Between(x, y, e.x, e.y);
+      if (d < bestDist) { bestDist = d; best = e; }
+    }
+    for (const t of this.tanks) {
+      const d = Phaser.Math.Distance.Between(x, y, t.x, t.y);
+      if (d < bestDist) { bestDist = d; best = t; }
+    }
+    return best;
+  }
+
+  isTargetAlive(target) {
+    return this.enemies.includes(target) || this.tanks.includes(target);
+  }
+
+  updateMissiles(dt) {
+    for (let i = this.missiles.length - 1; i >= 0; i--) {
+      const m = this.missiles[i];
+
+      if (m.homing) {
+        if (!m.target || !this.isTargetAlive(m.target)) {
+          m.target = this.findNearestTarget(m.x, m.y);
+        }
+        if (m.target) {
+          const d = Math.max(1, Math.hypot(m.target.x - m.x, m.target.y - m.y));
+          m.vx = (m.target.x - m.x) / d * MISSILE_SPEED;
+          m.vy = (m.target.y - m.y) / d * MISSILE_SPEED;
+          m.img.rotation = Math.atan2(m.vy, m.vx) + Math.PI / 2;
+        }
+      }
+
+      m.x += m.vx * dt;
+      m.y += m.vy * dt;
+      m.img.x = m.x;
+      m.img.y = m.y;
+
+      if (m.x < -30 || m.x > W + 30 || m.y < -30 || m.y > H + 30) {
+        m.img.destroy();
+        this.missiles.splice(i, 1);
+        continue;
+      }
+
+      if (this.resolveMissileCollision(m)) {
+        this.missiles.splice(i, 1);
+      }
+    }
+  }
+
+  resolveMissileCollision(m) {
+    const mx = m.x, my = m.y;
+
+    // влучання по ворогах
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      const e = this.enemies[i];
+      const hw = e.type === 'ship' ? 26 : e.type === 'jet' ? 20 : 14;
+      const hh = 12;
+      if (Math.abs(mx - e.x) < hw && Math.abs(my - e.y) < hh) {
+        this.destroyEnemy(e, i);
+        m.img.destroy();
+        return true;
+      }
+    }
+
+    // влучання по паливній станції
+    for (let i = 0; i < this.fuels.length; i++) {
+      const f = this.fuels[i];
+      if (Math.abs(mx - f.x) < 12 && Math.abs(my - f.y) < 14) {
+        this.destroyFuel(f, i);
+        m.img.destroy();
+        return true;
+      }
+    }
+
+    // влучання по танку на березі
+    for (let i = 0; i < this.tanks.length; i++) {
+      const t = this.tanks[i];
+      if (Math.abs(mx - t.x) < 12 && Math.abs(my - t.y) < 10) {
+        this.destroyTank(t, i);
+        m.img.destroy();
+        return true;
+      }
+    }
+
+    // влучання по повітряній кулі-бонусу — тільки звичайний постріл,
+    // спеціальна зброя (бокові/самонавідні постріли) кулі ігнорує
+    for (let i = 0; m.normal && i < this.balloons.length; i++) {
+      const b = this.balloons[i];
+      if (Math.abs(mx - b.x) < 14 && Math.abs(my - b.y) < 18) {
+        this.collectBalloon(b, i);
+        m.img.destroy();
+        return true;
+      }
+    }
+
+    // влучання по танку на мосту (окремо від самого мосту — знімає бонус x3)
+    for (const [bridge] of this.bridgeVisuals) {
+      if (bridge.tankAlive && bridge.tankImg &&
+          Math.abs(mx - bridge.tankImg.x) < 12 && Math.abs(my - bridge.tankImg.y) < 10) {
+        this.addScore(80);
+        this.spawnExplosion(bridge.tankImg.x, bridge.tankImg.y);
+        SFX.explode();
+        bridge.tankImg.destroy();
+        bridge.tankImg = null;
+        bridge.tankAlive = false;
+        m.img.destroy();
+        return true;
+      }
+    }
+
+    // влучання по мосту
+    const row = this.rowAtScreenY(my);
+    if (row && row.bridge && row.bridge.alive) {
+      const bridge = row.bridge;
+      const tankBonus = bridge.tankAlive;
+      bridge.alive = false;
+      bridge.hp = 0;
+      this.addScore(tankBonus ? 500 * 3 : 500);
+      this.spawnExplosion(mx, my);
+      if (tankBonus && bridge.tankImg) {
+        this.spawnExplosion(bridge.tankImg.x, bridge.tankImg.y);
+        bridge.tankImg.destroy();
+        bridge.tankImg = null;
+      }
+      bridge.tankAlive = false;
+      SFX.bridge();
+      m.img.destroy();
+      this.advanceLevel();
+      if (tankBonus) {
+        this.centerMsg.setText('LEVEL ' + this.level + '\nТАНК НА МОСТУ! x3 ОЧОК');
+        this.levelFlashTimer = 1.9;
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  destroyTank(t, idx) {
+    this.addScore(70);
+    this.spawnExplosion(t.x, t.y);
+    SFX.explode();
+    t.img.destroy();
+    this.tanks.splice(idx, 1);
+  }
+
+  destroyEnemy(e, idx) {
+    const points = { heli: 60, ship: 30, jet: 100 }[e.type] || 50;
+    this.addScore(points);
+    this.spawnExplosion(e.x, e.y);
+    SFX.explode();
+    e.img.destroy();
+    this.enemies.splice(idx, 1);
+  }
+
+  destroyFuel(f, idx) {
+    this.addScore(80);
+    this.spawnExplosion(f.x, f.y);
+    SFX.explode();
+    f.img.destroy();
+    f.label.destroy();
+    this.fuels.splice(idx, 1);
+  }
+
+  spawnExplosion(x, y) {
+    const img = this.add.image(x, y, 'explo1').setDepth(15).setScale(1.3);
+    this.explosions.push({ img, t: 0 });
+  }
+
+  updateExplosions(dt) {
+    for (let i = this.explosions.length - 1; i >= 0; i--) {
+      const ex = this.explosions[i];
+      ex.t += dt;
+      if (ex.t > 0.24) { ex.img.destroy(); this.explosions.splice(i, 1); continue; }
+      if (ex.t > 0.16) ex.img.setTexture('explo3');
+      else if (ex.t > 0.08) ex.img.setTexture('explo2');
+    }
+  }
+
+  addScore(v) {
+    this.score += v;
+    if (this.score >= this.nextExtraLife) {
+      this.lives++;
+      this.nextExtraLife += EXTRA_LIFE_STEP;
+      SFX.life();
+    }
+  }
+
+  advanceLevel() {
+    this.level++;
+    this.terrainGen.setLevel(this.level);
+    const speedMultiplier = 1 + 0.1 * (this.level - 1);
+    this.minSpeed = MIN_SPEED * speedMultiplier;
+    this.maxSpeed = BASE_MAX_SPEED * speedMultiplier;
+    this.scrollSpeed = Math.max(this.scrollSpeed, this.minSpeed);
+    this.centerMsg.setText('LEVEL ' + this.level);
+    this.subMsg.setText('');
+    this.levelFlashTimer = 1.4;
+  }
+
+  // -------------------------------------------------------------------
+  checkPlayerCollisions() {
+    if (this.invulnTimer > 0) return;
+
+    // берег / острів / міст
+    const samples = [PLAYER_Y - 12, PLAYER_Y, PLAYER_Y + 12];
+    for (const sy of samples) {
+      const row = this.rowAtScreenY(sy);
+      if (!this.isChannelSafe(row, this.player.x, PLAYER_HALF_W)) {
+        this.crashPlayer();
+        return;
+      }
+    }
+
+    // зіткнення з ворогами
+    for (const e of this.enemies) {
+      if (!e.alive) continue;
+      const hw = e.type === 'ship' ? 24 : e.type === 'jet' ? 18 : 13;
+      if (Math.abs(this.player.x - e.x) < hw + PLAYER_HALF_W - 4 && Math.abs(PLAYER_Y - e.y) < 14) {
+        this.spawnExplosion(e.x, e.y);
+        e.img.destroy();
+        this.enemies.splice(this.enemies.indexOf(e), 1);
+        this.crashPlayer();
+        return;
+      }
+    }
+  }
+
+  crashPlayer() {
+    if (this.invulnTimer > 0 || this.state !== 'playing') return;
+    SFX.crash();
+    this.spawnExplosion(this.player.x, PLAYER_Y);
+    this.lives--;
+    for (const m of this.missiles) m.img.destroy();
+    this.missiles = [];
+    // бонус пострілів діє до втрати життя — після краху скидається
+    this.activePower = null;
+
+    if (this.lives < 0) {
+      this.gameOver();
+      return;
+    }
+    this.player.x = W / 2;
+    this.player.angle = 0;
+    this.fuel = FUEL_MAX;
+    this.scrollSpeed = CRUISE_SPEED * 0.7;
+    this.invulnTimer = INVULN_TIME;
+  }
+
+  gameOver() {
+    this.state = 'gameover';
+    this.centerMsg.setText('ГРА ВСЬО');
+    this.subMsg.setText('SCORE ' + this.score + '\n\nSPACE — ще раз');
+    this.player.setVisible(false);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// КОНФІГ ТА СТАРТ
+// ---------------------------------------------------------------------------
+const config = {
+  type: Phaser.AUTO,
+  parent: 'game-container',
+  width: W,
+  height: H,
+  backgroundColor: '#000000',
+  pixelArt: true,
+  roundPixels: true,
+  scale: {
+    mode: Phaser.Scale.FIT,
+    autoCenter: Phaser.Scale.CENTER_BOTH
+  },
+  scene: [BootScene, TitleScene, GameScene]
+};
+
+window.addEventListener('load', () => {
+  window.game = new Phaser.Game(config);
+});

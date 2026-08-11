@@ -1,0 +1,12 @@
+{
+  "name": "river-raid-clone",
+  "version": "1.0.0",
+  "description": "Браузерний клон River Raid на Phaser 3",
+  "private": true,
+  "scripts": {
+    "test": "node tests/run-all.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.45.0"
+  }
+}
