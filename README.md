@@ -1,5 +1,6 @@
 # River Raid — клон класики на Phaser 3
 
+<<<<<<< HEAD
 🎮 **Грати онлайн:** https://esiteq.github.io/river-raid/
 
 Браузерний ремейк культової аркади **River Raid** (Activision, 1982) —
@@ -109,3 +110,6 @@ package.json        — playwright як devDependency, npm test запускає
 
 Детальний опис архітектури (модель скролу рельєфу, система бонусів,
 логіка танків тощо) — у [`CLAUDE.md`](./CLAUDE.md).
+=======
+A Classic River Raid game clone 1.0
+>>>>>>> 31cd171a1ea4a99095a15e19a74d329c137bf141
