@@ -18,10 +18,15 @@
 //    зменшується на 1 за КОЖЕН постріл (не за кожну з двох ракет), повторний
 //    підбір бонусу, поки лічильник ще не 0, ДОДАЄ 50 (не перезаписує), а
 //    коли лічильник доходить до нуля — бонус вимикається і наступний
-//    постріл уже звичайний одиночний
+//    постріл уже звичайний одиночний; сама самонавідна ракета — готова
+//    іконка 'homingMissile' (6x32), а не процедурна текстура 'missile'
 // 10) хітбокси тепер по реальних непрозорих пікселях PNG (pixelHit), а не по
 //     прямокутнику "на око": постріл у прозорий кут іконки — НЕ влучання,
 //     постріл у непрозору точку — влучання; враховує масштаб і дзеркалення
+// 11) тайтл-екран: картинка гравця й текст керування більше не перекриваються
+//     (getBounds() обох об'єктів не перетинаються), кнопка старту —
+//     "НАТИСНІТЬ ПРОБІЛ ДЛЯ ПОЧАТКУ", і під нею є рядок версії
+//     "vX.Y by Alex Raven"
 const { chromium } = require('playwright');
 const path = require('path');
 const { startServer } = require('./serve');
@@ -38,6 +43,18 @@ async function waitForGameScene(page) {
   return false;
 }
 
+async function waitForTitleScene(page) {
+  for (let i = 0; i < 40; i++) {
+    const ready = await page.evaluate(() => {
+      const t = window.game && window.game.scene && window.game.scene.keys.Title;
+      return !!(t && t.sys && t.sys.isActive());
+    });
+    if (ready) return true;
+    await page.waitForTimeout(100);
+  }
+  return false;
+}
+
 (async () => {
   const { server, url } = await startServer(path.join(__dirname, '..'));
   const browser = await chromium.launch();
@@ -47,6 +64,41 @@ async function waitForGameScene(page) {
   page.on('console', msg => { if (msg.type() === 'error') errors.push('CONSOLE: ' + msg.text()); });
 
   await page.goto(url + 'index.html');
+  await waitForTitleScene(page);
+
+  // ---------- 11) тайтл-екран: текст керування не перекриває картинку
+  // літака; кнопка старту й рядок версії ----------
+  const titleResult = await page.evaluate(() => {
+    const t = window.game.scene.keys.Title;
+    if (!t || !t.sys.isActive()) return { active: false };
+    const children = t.children.list;
+    const playerImg = children.find(c => c.type === 'Image' && c.texture && c.texture.key === 'player');
+    const texts = children.filter(c => c.type === 'Text');
+    const controlsText = texts.find(c => c.text.includes('рух літака'));
+    const startText = texts.find(c => c.text.includes('ПРОБІЛ'));
+    const versionText = texts.find(c => c.text.startsWith('v') && c.text.includes('by Alex Raven'));
+    const playerBounds = playerImg.getBounds();
+    const controlsBounds = controlsText.getBounds();
+    // прямокутники НЕ перетинаються, якщо один повністю по один бік від
+    // іншого хоч по одній з осей
+    const overlaps = !(controlsBounds.top >= playerBounds.bottom ||
+                        controlsBounds.bottom <= playerBounds.top ||
+                        controlsBounds.left >= playerBounds.right ||
+                        controlsBounds.right <= playerBounds.left);
+    return {
+      active: true,
+      overlaps,
+      startText: startText ? startText.text : null,
+      versionText: versionText ? versionText.text : null,
+      playerBounds: { top: Math.round(playerBounds.top), bottom: Math.round(playerBounds.bottom) },
+      controlsBounds: { top: Math.round(controlsBounds.top), bottom: Math.round(controlsBounds.bottom) },
+    };
+  });
+  console.log('11) тайтл-екран:', JSON.stringify(titleResult));
+  const okTitleScreen = titleResult.active === true && titleResult.overlaps === false &&
+    titleResult.startText === 'НАТИСНІТЬ ПРОБІЛ ДЛЯ ПОЧАТКУ' &&
+    /^v\d+\.\d+ by Alex Raven$/.test(titleResult.versionText || '');
+
   await waitForGameScene(page);
   await page.keyboard.press('Space');
   await page.waitForTimeout(200);
@@ -268,9 +320,12 @@ async function waitForGameScene(page) {
       s.handleShooting();
       const count = s.missiles.length;
       const anyHoming = s.missiles.some(m => m.homing);
+      const homingOne = s.missiles.find(m => m.homing);
+      const homingTexture = homingOne ? homingOne.img.texture.key : null;
+      const homingDisplaySize = homingOne ? { w: homingOne.img.displayWidth, h: homingOne.img.displayHeight } : null;
       for (const m of s.missiles) m.img.destroy();
       s.missiles = [];
-      return { count, anyHoming };
+      return { count, anyHoming, homingTexture, homingDisplaySize };
     }
     const fakeBalloon = () => ({ x: 0, y: 0, letter: 'M', img: { destroy() {} }, label: { destroy() {} } });
 
@@ -308,7 +363,9 @@ async function waitForGameScene(page) {
     homingResult.lastHomingShot.anyHoming === true &&
     homingResult.afterDepleted.activePower === null && homingResult.afterDepleted.homingCount === 0 &&
     homingResult.shotAfterDepleted.count === 1 && homingResult.shotAfterDepleted.anyHoming === false &&
-    homingResult.hudText === 'HOMING ★ 47';
+    homingResult.hudText === 'HOMING ★ 47' &&
+    homingResult.shot1.homingTexture === 'homingMissile' &&
+    homingResult.shot1.homingDisplaySize.w === 6 && homingResult.shot1.homingDisplaySize.h === 32;
 
   // ---------- 10) хітбокси по масці PNG (pixelHit), а не по прямокутнику
   // "на око" ----------
@@ -454,9 +511,10 @@ async function waitForGameScene(page) {
   console.log('okExplosionAnim:', okExplosionAnim);
   console.log('okHoming:', okHoming);
   console.log('okPixelMask:', okPixelMask);
+  console.log('okTitleScreen:', okTitleScreen);
 
   const allOk = errors.length === 0 && okIconsLoaded && okHeliFires && okHeliHits && okDecoDestroyed &&
     okDecoImages && okRiverBendsMore && okJetFlip && okNoFuelLabel && okExplosionAnim &&
-    okHoming && okPixelMask;
+    okHoming && okPixelMask && okTitleScreen;
   process.exitCode = allOk ? 0 : 1;
 })();

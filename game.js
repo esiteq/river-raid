@@ -10,6 +10,10 @@
 // ---------------------------------------------------------------------------
 // КОНСТАНТИ
 // ---------------------------------------------------------------------------
+// версія гри — показується на тайтл-екрані ("vX.Y by Alex Raven"). Онови
+// цей рядок разом із записом у CHANGELOG.md при кожній помітній зміні.
+const GAME_VERSION = '1.15';
+
 const W = 480;
 // ігрове поле займає всю висоту екрана: беремо реальну висоту вікна
 // (з розумними межами, щоб на крихітних чи величезних екранах усе лишалось
@@ -49,6 +53,7 @@ const PLAYER_TITLE_SCALE = 1;        // → 96x96 (гравець на тайт�
 const JET_SCALE = 1;                 // → 44x31 (нативний розмір)
 const SHIP_SCALE = 1;                // → 52x31 (нативний розмір)
 const FUEL_SCALE = 1;                // → 26x36 (нативний розмір)
+const HOMING_MISSILE_SCALE = 1;      // → 6x32 (нативний розмір; лише ракети самонаведення)
 
 // Анімація вибуху ('explo', spawnExplosion()/updateExplosions()): "росте" до
 // половини тривалості, потім "зменшується" назад, і весь час обертається за
@@ -462,6 +467,10 @@ class BootScene extends Phaser.Scene {
     this.load.image('tree2', 'assets/tree2.png');
     this.load.image('bush1', 'assets/bush1.png');
     this.load.image('bush2', 'assets/bush2.png');
+    // ракета самонаведення (бонус M) — готова іконка замість процедурного
+    // прямокутника; звичайний/потрійний постріл і далі малюються процедурно
+    // (текстура 'missile', без змін)
+    this.load.image('homingMissile', 'assets/homingMissile.png');
   }
   create() {
     generateAllTextures(this);
@@ -469,7 +478,7 @@ class BootScene extends Phaser.Scene {
     // вмикаємо їм лінійну фільтрацію: глобальний pixelArt:true в конфігу гри
     // інакше даватиме грубе "сходинкове" масштабування при зменшенні розміру
     for (const key of ['tank', 'heli', 'balloon', 'player', 'jet', 'ship', 'fuel', 'explo',
-                        'tree1', 'tree2', 'bush1', 'bush2']) {
+                        'tree1', 'tree2', 'bush1', 'bush2', 'homingMissile']) {
       this.textures.get(key).setFilter(Phaser.Textures.FilterMode.LINEAR);
     }
     // альфа-маски для хітбоксів "по пікселях" — лише для іконок, по яких
@@ -489,30 +498,39 @@ class TitleScene extends Phaser.Scene {
   create() {
     this.cameras.main.setBackgroundColor('#04122b');
 
-    this.add.text(W / 2, 150, 'RIVER RAID', {
-      fontFamily: 'Courier New, monospace', fontSize: '48px', fontStyle: 'bold',
+    // Розкладка тайтл-екрана — фіксовані Y-координати (як і раніше), але
+    // підібрані так, щоб жоден напис не заходив на зображення літака
+    // (раніше блок керування "← → ↑ ↓ SPACE" наїжджав просто на картинку).
+    // Літак підняли вище й зменшили, а решту блоків підсунули під нього з
+    // явним запасом.
+    this.add.text(W / 2, 68, 'RIVER RAID', {
+      fontFamily: 'Courier New, monospace', fontSize: '44px', fontStyle: 'bold',
       color: '#39ff6a'
     }).setOrigin(0.5).setShadow(3, 3, '#0a3d17', 0, false, true);
 
-    this.add.image(W / 2, 230, 'player').setScale(PLAYER_TITLE_SCALE);
+    this.add.image(W / 2, 150, 'player').setScale(PLAYER_TITLE_SCALE * 0.8);
 
     const lines = [
       '← →  рух літака      ↑ прискорення',
       '↓ гальмо              SPACE постріл',
-      'P/ESC   пауза',
-      '',
-      'Не врізайся в береги, збивай мости,',
-      'не дай закінчитись пальному.'
+      'P/ESC   пауза'
     ];
-    this.add.text(W / 2, 300, lines, {
-      fontFamily: 'Courier New, monospace', fontSize: '16px', color: '#cfe8ff', align: 'center'
+    this.add.text(W / 2, 226, lines, {
+      fontFamily: 'Courier New, monospace', fontSize: '15px', color: '#cfe8ff', align: 'center', lineSpacing: 4
     }).setOrigin(0.5);
 
-    this.add.text(W / 2, 372, 'Збий веселкову кульку — отримай бонус!', {
+    this.add.text(W / 2, 280, [
+      'Не врізайся в береги, збивай мости,',
+      'не дай закінчитись пальному.'
+    ], {
+      fontFamily: 'Courier New, monospace', fontSize: '14px', color: '#cfe8ff', align: 'center', lineSpacing: 3
+    }).setOrigin(0.5);
+
+    this.add.text(W / 2, 320, 'Збий веселкову кульку — отримай бонус!', {
       fontFamily: 'Courier New, monospace', fontSize: '14px', color: '#ffd6f5'
     }).setOrigin(0.5);
-    this.add.image(W / 2 - 110, 425, 'balloon').setScale(BALLOON_SCALE * 1.6);
-    this.add.text(W / 2 - 65, 400, [
+    this.add.image(W / 2 - 110, 375, 'balloon').setScale(BALLOON_SCALE * 1.6);
+    this.add.text(W / 2 - 65, 350, [
       'T — потрійний вогонь',
       'M — самонаведення',
       'D — швидкий вогонь',
@@ -523,8 +541,12 @@ class TitleScene extends Phaser.Scene {
       fontFamily: 'Courier New, monospace', fontSize: '13px', color: '#cfe8ff', align: 'left', lineSpacing: 3
     }).setOrigin(0, 0);
 
-    this.blink = this.add.text(W / 2, 600, 'PRESS SPACE TO START', {
-      fontFamily: 'Courier New, monospace', fontSize: '20px', fontStyle: 'bold', color: '#ffe066'
+    this.blink = this.add.text(W / 2, 550, 'НАТИСНІТЬ ПРОБІЛ ДЛЯ ПОЧАТКУ', {
+      fontFamily: 'Courier New, monospace', fontSize: '19px', fontStyle: 'bold', color: '#ffe066'
+    }).setOrigin(0.5);
+
+    this.add.text(W / 2, 582, `v${GAME_VERSION} by Alex Raven`, {
+      fontFamily: 'Courier New, monospace', fontSize: '12px', color: '#5a7089'
     }).setOrigin(0.5);
 
     this.tweens.add({ targets: this.blink, alpha: 0.15, duration: 550, yoyo: true, repeat: -1 });
@@ -1363,7 +1385,10 @@ class GameScene extends Phaser.Scene {
       vx = (target.x - startX) / d * MISSILE_SPEED;
       vy = (target.y - startY) / d * MISSILE_SPEED;
     }
-    const img = this.add.image(startX, startY, 'missile').setDepth(9);
+    // готова іконка ('homingMissile'), а не процедурна текстура 'missile' —
+    // ніс дивиться вгору за замовчуванням, так само як і стара процедурна,
+    // тож формула повороту (rotation = atan2(vy,vx) + PI/2) не змінювалась
+    const img = this.add.image(startX, startY, 'homingMissile').setDepth(9).setScale(HOMING_MISSILE_SCALE);
     img.rotation = Math.atan2(vy, vx) + Math.PI / 2;
     // самонавідні ракети — спеціальна зброя, кулі-бонуси не чіпають
     this.missiles.push({ img, x: startX, y: startY, vx, vy, homing: true, target, normal: false });
