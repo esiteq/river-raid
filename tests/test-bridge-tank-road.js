@@ -9,6 +9,7 @@
 // від швидкості польоту ракети чи частоти кадрів у headless-браузері.
 const { chromium } = require('playwright');
 const path = require('path');
+const { startServer } = require('./serve');
 
 async function waitForGameScene(page) {
   for (let i = 0; i < 40; i++) {
@@ -37,6 +38,7 @@ async function forceBridgeSpawn(page) {
 }
 
 (async () => {
+  const { server, url } = await startServer(path.join(__dirname, '..'));
   const browser = await chromium.launch();
   const errors = [];
 
@@ -44,7 +46,7 @@ async function forceBridgeSpawn(page) {
   const pageA = await browser.newPage({ viewport: { width: 520, height: 800 } });
   pageA.on('pageerror', e => errors.push('PAGEERROR(A): ' + e.message));
   pageA.on('console', msg => { if (msg.type() === 'error') errors.push('CONSOLE(A): ' + msg.text()); });
-  await pageA.goto('file://' + path.join(__dirname, '..', 'index.html'));
+  await pageA.goto(url + 'index.html');
   await waitForGameScene(pageA);
   await pageA.keyboard.press('Space');
   await pageA.waitForTimeout(200);
@@ -106,7 +108,7 @@ async function forceBridgeSpawn(page) {
   const pageB = await browser.newPage({ viewport: { width: 520, height: 800 } });
   pageB.on('pageerror', e => errors.push('PAGEERROR(B): ' + e.message));
   pageB.on('console', msg => { if (msg.type() === 'error') errors.push('CONSOLE(B): ' + msg.text()); });
-  await pageB.goto('file://' + path.join(__dirname, '..', 'index.html'));
+  await pageB.goto(url + 'index.html');
   await waitForGameScene(pageB);
   await pageB.keyboard.press('Space');
   await pageB.waitForTimeout(200);
@@ -150,7 +152,7 @@ async function forceBridgeSpawn(page) {
   const pageC = await browser.newPage({ viewport: { width: 520, height: 800 } });
   pageC.on('pageerror', e => errors.push('PAGEERROR(C): ' + e.message));
   pageC.on('console', msg => { if (msg.type() === 'error') errors.push('CONSOLE(C): ' + msg.text()); });
-  await pageC.goto('file://' + path.join(__dirname, '..', 'index.html'));
+  await pageC.goto(url + 'index.html');
   await waitForGameScene(pageC);
   await pageC.keyboard.press('Space');
   await pageC.waitForTimeout(200);
@@ -179,6 +181,7 @@ async function forceBridgeSpawn(page) {
   await pageC.close();
 
   await browser.close();
+  server.close();
 
   console.log('ERRORS:', errors.length ? errors.join('\n') : 'none');
   console.log('okA_startsOnRoad:', okA_startsOnRoad);

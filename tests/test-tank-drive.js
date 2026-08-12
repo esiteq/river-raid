@@ -1,14 +1,16 @@
 const { chromium } = require('playwright');
 const path = require('path');
+const { startServer } = require('./serve');
 
 (async () => {
+  const { server, url } = await startServer(path.join(__dirname, '..'));
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 900, height: 1000 } });
   const errors = [];
   page.on('pageerror', e => errors.push('PAGEERROR: ' + e.message));
   page.on('console', msg => { if (msg.type() === 'error') errors.push('CONSOLE: ' + msg.text()); });
 
-  await page.goto('file://' + path.join(__dirname, '..', 'index.html'));
+  await page.goto(url + 'index.html');
   await page.waitForTimeout(300);
 
   // перевірка висоти canvas (має відповідати innerHeight, з межами 640..1400)
@@ -145,5 +147,6 @@ const path = require('path');
   console.log('okHeight:', okHeight, 'okDrive:', okDrive, 'okBlocked:', okBlocked, 'okShot:', okShot, 'okText:', okText);
 
   await browser.close();
+  server.close();
   process.exitCode = (errors.length || !okHeight || !okDrive || !okBlocked || !okShot || !okText) ? 1 : 0;
 })();

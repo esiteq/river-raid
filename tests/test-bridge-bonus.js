@@ -2,15 +2,17 @@
 // потроює нарахування очків.
 const { chromium } = require('playwright');
 const path = require('path');
+const { startServer } = require('./serve');
 
 (async () => {
+  const { server, url } = await startServer(path.join(__dirname, '..'));
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 520, height: 720 } });
   const errors = [];
   page.on('pageerror', e => errors.push('PAGEERROR: ' + e.message));
   page.on('console', msg => { if (msg.type() === 'error') errors.push('CONSOLE: ' + msg.text()); });
 
-  await page.goto('file://' + path.join(__dirname, '..', 'index.html'));
+  await page.goto(url + 'index.html');
   await page.waitForTimeout(300);
   await page.keyboard.press('Space');
   await page.waitForTimeout(200);
@@ -49,5 +51,6 @@ const path = require('path');
 
   console.log('ERRORS:', errors.length ? errors.join('\n') : 'none');
   await browser.close();
+  server.close();
   process.exitCode = errors.length ? 1 : 0;
 })();

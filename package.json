@@ -4,6 +4,7 @@
   "description": "Браузерний клон River Raid на Phaser 3",
   "private": true,
   "scripts": {
+    "start": "node serve.js",
     "test": "node tests/run-all.js"
   },
   "devDependencies": {
