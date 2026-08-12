@@ -162,6 +162,23 @@ async function waitForTitleScene(page) {
   console.log('6) заправка без напису FUEL:', JSON.stringify(fuelLabelResult));
   const okNoFuelLabel = fuelLabelResult.fuelCount === 1 && fuelLabelResult.hasLabel === false;
 
+  // ---------- 14) не більше 3 заправок одночасно на екрані ----------
+  const fuelCapResult = await page.evaluate(() => {
+    const s = window.game.scene.keys.Game;
+    s.fuels.forEach(f => f.img.destroy());
+    s.fuels = [];
+    for (let i = 0; i < 10; i++) s.spawnFuel(); // намагаємось заспавнити явно більше за ліміт
+    const countAtCap = s.fuels.length;
+    // після знищення однієї — знову можна заспавнити ще одну (ліміт не "залипає")
+    const removed = s.fuels.pop();
+    if (removed) removed.img.destroy();
+    s.spawnFuel();
+    const countAfterFreeingSlot = s.fuels.length;
+    return { countAtCap, countAfterFreeingSlot };
+  });
+  console.log('14) ліміт заправок на екрані:', JSON.stringify(fuelCapResult));
+  const okFuelCap = fuelCapResult.countAtCap === 3 && fuelCapResult.countAfterFreeingSlot === 3;
+
   // ---------- 5) 'jet' коректно дзеркалиться за напрямком польоту ----------
   const jetFlipResult = await page.evaluate(() => {
     const s = window.game.scene.keys.Game;
@@ -561,6 +578,74 @@ async function waitForTitleScene(page) {
     decoSpreadResult.maxInset > 40 && // доводить, що це НЕ стара вузька смужка 6-26px
     decoSpreadResult.farFromBankCount > 0;
 
+  // ---------- 15) жовтий пісок біля води: ширина 0..SAND_MAX_WIDTH, часом
+  // зникає зовсім (не паралельна смуга), часом сягає майже максимуму;
+  // рендер (drawTerrain) не падає навіть на екстремальних значеннях ----------
+  const sandResult = await page.evaluate(() => {
+    const s = window.game.scene.keys.Game;
+    const tg = s.terrainGen;
+    const aVals = [], bVals = [];
+    for (let i = 0; i < 2000; i++) {
+      const row = tg.nextRow(8);
+      aVals.push(row.sandA);
+      bVals.push(row.sandB);
+    }
+    // смоук-тест рендеру на межових значеннях (пісок ширший за вузький берег)
+    const row3 = s.rows[3];
+    const savedA = row3.sandA, savedB = row3.sandB;
+    row3.sandA = SAND_MAX_WIDTH; row3.sandB = SAND_MAX_WIDTH;
+    let drawThrew = false;
+    try { s.drawTerrain(); } catch (e) { drawThrew = true; }
+    row3.sandA = savedA; row3.sandB = savedB;
+    return {
+      minA: Math.min(...aVals), maxA: Math.max(...aVals),
+      minB: Math.min(...bVals), maxB: Math.max(...bVals),
+      zeroA: aVals.filter(v => v < 0.5).length,
+      zeroB: bVals.filter(v => v < 0.5).length,
+      nearMaxA: aVals.filter(v => v > SAND_MAX_WIDTH - 4).length,
+      nearMaxB: bVals.filter(v => v > SAND_MAX_WIDTH - 4).length,
+      drawThrew, SAND_MAX_WIDTH,
+    };
+  });
+  console.log('15) жовтий пісок біля води:', JSON.stringify(sandResult));
+  const okSand = sandResult.minA >= -0.001 && sandResult.minB >= -0.001 &&
+    sandResult.maxA <= sandResult.SAND_MAX_WIDTH + 0.001 && sandResult.maxB <= sandResult.SAND_MAX_WIDTH + 0.001 &&
+    sandResult.zeroA > 0 && sandResult.zeroB > 0 && // подекуди зникає повністю
+    sandResult.nearMaxA > 0 && sandResult.nearMaxB > 0 && // подекуди сягає майже максимуму
+    sandResult.drawThrew === false;
+
+  // ---------- 16) анімовані сплески на воді (waveSplash): спавняться на
+  // воді, ростуть/тьмяніють і самі зникають після WAVE_DURATION, кількість
+  // одночасних сплесків обмежена WAVE_MAX_ONSCREEN ----------
+  const waveResult = await page.evaluate(() => {
+    const s = window.game.scene.keys.Game;
+    s.waveSplashes.forEach(w => w.img.destroy());
+    s.waveSplashes = [];
+    for (let i = 0; i < 5; i++) s.spawnWaveSplash(); // кілька спроб — деякі рядки можуть мати вузьку воду
+    const spawnedAtLeastOne = s.waveSplashes.length >= 1;
+    const first = s.waveSplashes[0];
+    const textureOk = first ? first.img.texture.key === 'waveSplash' : false;
+    const scaleAtStart = first ? first.img.scaleX : null;
+
+    // прокручуємо час одним великим кроком — сплески мають самі зникнути
+    s.updateWaveSplashes(0, WAVE_DURATION + 0.1);
+    const goneAfterDuration = s.waveSplashes.length === 0;
+
+    // ліміт одночасних сплесків
+    s.waveSplashes = [];
+    for (let i = 0; i < WAVE_MAX_ONSCREEN + 15; i++) s.spawnWaveSplash();
+    const cappedCount = s.waveSplashes.length;
+    s.waveSplashes.forEach(w => w.img.destroy());
+    s.waveSplashes = [];
+
+    return { spawnedAtLeastOne, textureOk, scaleAtStart, goneAfterDuration, cappedCount, WAVE_MAX_ONSCREEN, WAVE_START_SCALE };
+  });
+  console.log('16) сплески на воді:', JSON.stringify(waveResult));
+  const okWaves = waveResult.spawnedAtLeastOne === true && waveResult.textureOk === true &&
+    Math.abs(waveResult.scaleAtStart - waveResult.WAVE_START_SCALE) < 0.001 &&
+    waveResult.goneAfterDuration === true &&
+    waveResult.cappedCount === waveResult.WAVE_MAX_ONSCREEN;
+
   await browser.close();
   server.close();
 
@@ -579,9 +664,13 @@ async function waitForTitleScene(page) {
   console.log('okTitleScreen:', okTitleScreen);
   console.log('okIslandChannel:', okIslandChannel);
   console.log('okDecoSpread:', okDecoSpread);
+  console.log('okFuelCap:', okFuelCap);
+  console.log('okSand:', okSand);
+  console.log('okWaves:', okWaves);
 
   const allOk = errors.length === 0 && okIconsLoaded && okHeliFires && okHeliHits && okDecoDestroyed &&
     okDecoImages && okRiverBendsMore && okJetFlip && okNoFuelLabel && okExplosionAnim &&
-    okHoming && okPixelMask && okTitleScreen && okIslandChannel && okDecoSpread;
+    okHoming && okPixelMask && okTitleScreen && okIslandChannel && okDecoSpread && okFuelCap &&
+    okSand && okWaves;
   process.exitCode = allOk ? 0 : 1;
 })();
