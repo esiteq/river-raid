@@ -69,6 +69,10 @@ const DECO_BUSH_KEYS = ['bush1', 'bush2'];
 
 
 const MISSILE_SPEED = 520;
+// бонус 'M' (HOMING) — скільки самонавідних пострілів дає ОДНА підібрана
+// куля; якщо підібрати ще одну, поки лічильник ще не вичерпаний, додається
+// стільки ж ЗВЕРХУ наявної кількості (не перезаписує)
+const HOMING_BONUS_AMOUNT = 50;
 const FUEL_MAX = 100;
 const FUEL_DRAIN_BASE = 2.0;           // одиниць/сек на мін. швидкості
 const FUEL_DRAIN_MAX = 5.2;            // одиниць/сек на макс. швидкості
@@ -375,6 +379,61 @@ class TerrainGen {
 }
 
 // ---------------------------------------------------------------------------
+// ПІКСЕЛЬНІ МАСКИ ХІТБОКСІВ — для готових PNG-іконок хітбокс визначається не
+// прямокутником "на око" (як було раніше), а реальними непрозорими пікселями
+// самої картинки: якщо в конкретній точці PNG прозорий піксель — влучання НЕ
+// рахується, навіть якщо точка формально в межах bounding box іконки. Це
+// прибирає відчуття "перекошених"/хибних влучань біля країв асиметричних
+// іконок (щогла корабля, лопаті гелікоптера, нерівна крона дерева тощо), яке
+// було з фіксованими hw/hh-прямокутниками, підігнаними "на око" під старі
+// процедурні спрайти.
+// ---------------------------------------------------------------------------
+const SPRITE_MASKS = {};   // texture key -> { width, height, alpha: Uint8ClampedArray }
+
+// будує альфа-маску для однієї текстури — викликається один раз при
+// завантаженні (BootScene.create()) для кожної PNG-іконки, по якій реально
+// перевіряється влучання пострілу/ракети
+function buildSpriteMask(scene, key) {
+  const src = scene.textures.get(key).getSourceImage();
+  const w = src.width, h = src.height;
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(src, 0, 0);
+  const data = ctx.getImageData(0, 0, w, h).data; // RGBA, 4 байти на піксель
+  const alpha = new Uint8ClampedArray(w * h);
+  for (let i = 0; i < alpha.length; i++) alpha[i] = data[i * 4 + 3];
+  SPRITE_MASKS[key] = { width: w, height: h, alpha };
+}
+
+// чи є непрозорий піксель картинки img (Phaser.Image) у світовій точці
+// (worldX, worldY)? Враховує позицію, масштаб, кут повороту й дзеркалення
+// (flipX/flipY) самого об'єкта — тобто хітбокс завжди точно збігається з
+// тим, що реально намальовано на екрані в цей момент, а не зі старою
+// фіксованою "коробкою" навколо центру.
+function pixelHit(img, worldX, worldY) {
+  const mask = SPRITE_MASKS[img.texture.key];
+  if (!mask) return false; // немає маски для цієї текстури — вважаємо промахом
+  let dx = worldX - img.x;
+  let dy = worldY - img.y;
+  if (img.angle) {
+    const rad = Phaser.Math.DegToRad(-img.angle);
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    const rx = dx * cos - dy * sin;
+    const ry = dx * sin + dy * cos;
+    dx = rx; dy = ry;
+  }
+  dx /= img.scaleX;
+  dy /= img.scaleY;
+  if (img.flipX) dx = -dx;
+  if (img.flipY) dy = -dy;
+  const px = Math.round(mask.width / 2 + dx);
+  const py = Math.round(mask.height / 2 + dy);
+  if (px < 0 || py < 0 || px >= mask.width || py >= mask.height) return false;
+  return mask.alpha[py * mask.width + px] > 20; // поріг відсікає майже прозорі краї (антиаліасинг)
+}
+
+// ---------------------------------------------------------------------------
 // BOOT SCENE — генерація текстур
 // ---------------------------------------------------------------------------
 class BootScene extends Phaser.Scene {
@@ -412,6 +471,11 @@ class BootScene extends Phaser.Scene {
     for (const key of ['tank', 'heli', 'balloon', 'player', 'jet', 'ship', 'fuel', 'explo',
                         'tree1', 'tree2', 'bush1', 'bush2']) {
       this.textures.get(key).setFilter(Phaser.Textures.FilterMode.LINEAR);
+    }
+    // альфа-маски для хітбоксів "по пікселях" — лише для іконок, по яких
+    // реально перевіряється влучання пострілу/ракети (resolveMissileCollision)
+    for (const key of ['tank', 'heli', 'ship', 'jet', 'fuel', 'balloon', 'tree1', 'tree2', 'bush1', 'bush2']) {
+      buildSpriteMask(this, key);
     }
     this.scene.start('Title');
   }
@@ -521,6 +585,13 @@ class GameScene extends Phaser.Scene {
     this.missiles = [];     // ракети гравця {img, x, y, vx, vy, homing, target}
     this.explosions = [];
     this.activePower = null; // null | 'triple' | 'missile' | 'double'
+    // скільки самонавідних пострілів лишилось у бонусі 'missile' (HOMING).
+    // Актуальне лише поки this.activePower === 'missile'; зменшується на 1
+    // за КОЖЕН постріл (handleShooting), а не за кожну окрему ракету (їх дві
+    // за постріл — вліво і вправо). Коли досягає 0 — activePower скидається
+    // в null, і гравець повертається до звичайного одиночного пострілу, як
+    // на самому початку гри.
+    this.homingCount = 0;
 
     this.enemyTimer = 1.6;
     this.fuelTimer = 1.6;
@@ -559,8 +630,11 @@ class GameScene extends Phaser.Scene {
     this.scoreText.setText('SCORE ' + this.score);
     this.levelText.setText('LEVEL ' + this.level);
     this.livesText.setText('LIVES ' + Math.max(0, this.lives));
-    const powerNames = { triple: 'TRIPLE ★', missile: 'HOMING ★', double: 'DOUBLE ★' };
-    this.powerText.setText(this.activePower ? powerNames[this.activePower] : '');
+    const powerNames = { triple: 'TRIPLE ★', double: 'DOUBLE ★' };
+    this.powerText.setText(
+      this.activePower === 'missile' ? `HOMING ★ ${this.homingCount}` :
+      this.activePower ? powerNames[this.activePower] : ''
+    );
     const frac = Phaser.Math.Clamp(this.fuel / FUEL_MAX, 0, 1);
     this.fuelBarFill.width = 196 * frac;
     this.fuelBarFill.fillColor = frac < 0.25 ? 0xe03c3c : 0xffcc00;
@@ -1201,8 +1275,19 @@ class GameScene extends Phaser.Scene {
     } else if (letter === 'X') {
       this.lives++;
       SFX.extraLife();
+    } else if (letter === 'M') {
+      // якщо самонавідні ракети вже активні й лічильник ще не вичерпаний —
+      // додаємо ЗВЕРХУ наявної кількості; інакше (перший підбір або
+      // лічильник уже дійшов до нуля) — стартуємо заново з HOMING_BONUS_AMOUNT
+      if (this.activePower === 'missile' && this.homingCount > 0) {
+        this.homingCount += HOMING_BONUS_AMOUNT;
+      } else {
+        this.homingCount = HOMING_BONUS_AMOUNT;
+      }
+      this.activePower = 'missile';
+      SFX.life();
     } else {
-      this.activePower = letter === 'T' ? 'triple' : letter === 'M' ? 'missile' : 'double';
+      this.activePower = letter === 'T' ? 'triple' : 'double';
       SFX.life();
     }
   }
@@ -1243,6 +1328,14 @@ class GameScene extends Phaser.Scene {
       this.spawnMissile(0, -MISSILE_SPEED, true);   // звичайний постріл залишається
       this.spawnHomingMissile(-1);                  // + самонавідні з боків
       this.spawnHomingMissile(1);
+      // лічильник зменшується на 1 за ВЕСЬ постріл (не за кожну з двох
+      // ракет окремо) — коли доходить до нуля, бонус закінчується і
+      // наступний постріл буде вже звичайним, як на початку гри
+      this.homingCount--;
+      if (this.homingCount <= 0) {
+        this.homingCount = 0;
+        this.activePower = null;
+      }
     } else {
       if (this.missiles.length > 0) return;
       this.spawnMissile(0, -MISSILE_SPEED, true);
@@ -1329,12 +1422,11 @@ class GameScene extends Phaser.Scene {
   resolveMissileCollision(m) {
     const mx = m.x, my = m.y;
 
-    // влучання по ворогах
+    // влучання по ворогах — хітбокс по реальних непрозорих пікселях іконки
+    // (pixelHit), а не по прямокутнику "на око"
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
-      const hw = e.type === 'ship' ? 26 : e.type === 'jet' ? 20 : 14;
-      const hh = 12;
-      if (Math.abs(mx - e.x) < hw && Math.abs(my - e.y) < hh) {
+      if (pixelHit(e.img, mx, my)) {
         this.destroyEnemy(e, i);
         m.img.destroy();
         return true;
@@ -1344,7 +1436,7 @@ class GameScene extends Phaser.Scene {
     // влучання по паливній станції
     for (let i = 0; i < this.fuels.length; i++) {
       const f = this.fuels[i];
-      if (Math.abs(mx - f.x) < 12 && Math.abs(my - f.y) < 14) {
+      if (pixelHit(f.img, mx, my)) {
         this.destroyFuel(f, i);
         m.img.destroy();
         return true;
@@ -1354,36 +1446,32 @@ class GameScene extends Phaser.Scene {
     // влучання по танку на березі
     for (let i = 0; i < this.tanks.length; i++) {
       const t = this.tanks[i];
-      if (Math.abs(mx - t.x) < 12 && Math.abs(my - t.y) < 10) {
+      if (pixelHit(t.img, mx, my)) {
         this.destroyTank(t, i);
         m.img.destroy();
         return true;
       }
     }
 
-    // влучання по дереву/кущу на березі — тепер їх можна знищувати.
-    // Радіуси підігнані під реальний розмір нових PNG-іконок (дерево
-    // ~29-34x32, кущ ~28x15-16) — трохи більші, ніж у старих процедурних
-    // "кружечків", бо самі картинки тепер помітніші.
+    // влучання по дереву/кущу на березі — тепер їх можна знищувати, і теж
+    // по реальних пікселях картинки (не по грубому прямокутнику). Швидкий
+    // грубий відсів по Y лишається — щоб не гонити pixelHit по КОЖНОМУ
+    // рядку масиву щоразу, а тільки по тих, що фізично близько до пострілу.
     for (let i = 0; i < this.rows.length; i++) {
       const row = this.rows[i];
       const y = i * ROW_H + this.scrollAccum;
       if (Math.abs(my - (y + 6)) > 22) continue;
-      if (row.decoLeft) {
-        const dx = row.left - row.decoLeft.inset;
-        if (Math.abs(mx - dx) < (row.decoLeft.tree ? 16 : 14)) {
-          this.destroyDeco(row, 'decoLeft', dx, y + 6);
-          m.img.destroy();
-          return true;
-        }
+      if (row.decoLeft && row.decoLeft.img && pixelHit(row.decoLeft.img, mx, my)) {
+        const img = row.decoLeft.img;
+        this.destroyDeco(row, 'decoLeft', img.x, img.y);
+        m.img.destroy();
+        return true;
       }
-      if (row.decoRight) {
-        const dx = row.right + row.decoRight.inset;
-        if (Math.abs(mx - dx) < (row.decoRight.tree ? 16 : 14)) {
-          this.destroyDeco(row, 'decoRight', dx, y + 6);
-          m.img.destroy();
-          return true;
-        }
+      if (row.decoRight && row.decoRight.img && pixelHit(row.decoRight.img, mx, my)) {
+        const img = row.decoRight.img;
+        this.destroyDeco(row, 'decoRight', img.x, img.y);
+        m.img.destroy();
+        return true;
       }
     }
 
@@ -1391,7 +1479,7 @@ class GameScene extends Phaser.Scene {
     // спеціальна зброя (бокові/самонавідні постріли) кулі ігнорує
     for (let i = 0; m.normal && i < this.balloons.length; i++) {
       const b = this.balloons[i];
-      if (Math.abs(mx - b.x) < 14 && Math.abs(my - b.y) < 18) {
+      if (pixelHit(b.img, mx, my)) {
         this.collectBalloon(b, i);
         m.img.destroy();
         return true;
@@ -1400,8 +1488,7 @@ class GameScene extends Phaser.Scene {
 
     // влучання по танку на мосту (окремо від самого мосту — знімає бонус x3)
     for (const [bridge] of this.bridgeVisuals) {
-      if (bridge.tankAlive && bridge.tankImg &&
-          Math.abs(mx - bridge.tankImg.x) < 12 && Math.abs(my - bridge.tankImg.y) < 10) {
+      if (bridge.tankAlive && bridge.tankImg && pixelHit(bridge.tankImg, mx, my)) {
         this.addScore(80);
         this.spawnExplosion(bridge.tankImg.x, bridge.tankImg.y);
         SFX.explode();
@@ -1569,6 +1656,7 @@ class GameScene extends Phaser.Scene {
     this.missiles = [];
     // бонус пострілів діє до втрати життя — після краху скидається
     this.activePower = null;
+    this.homingCount = 0;
 
     if (this.lives < 0) {
       this.gameOver();

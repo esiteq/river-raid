@@ -14,6 +14,14 @@
 //    Graphics-примітиви щокадру): спавн з правильною текстурою за
 //    типом/варіантом, рух разом зі скролом, знищення і пострілом, і при
 //    вислизанні рядка за нижній край масиву рядків
+// 9) бонус HOMING (M): лічильник стартує з HOMING_BONUS_AMOUNT (50),
+//    зменшується на 1 за КОЖЕН постріл (не за кожну з двох ракет), повторний
+//    підбір бонусу, поки лічильник ще не 0, ДОДАЄ 50 (не перезаписує), а
+//    коли лічильник доходить до нуля — бонус вимикається і наступний
+//    постріл уже звичайний одиночний
+// 10) хітбокси тепер по реальних непрозорих пікселях PNG (pixelHit), а не по
+//     прямокутнику "на око": постріл у прозорий кут іконки — НЕ влучання,
+//     постріл у непрозору точку — влучання; враховує масштаб і дзеркалення
 const { chromium } = require('playwright');
 const path = require('path');
 const { startServer } = require('./serve');
@@ -172,14 +180,22 @@ async function waitForGameScene(page) {
     // детермінованим (а не випадково влучав по ЧУЖОМУ дереву раніше в циклі
     // resolveMissileCollision() і хибно провалював decoGone), прибираємо
     // геть усі, крім того, яке ставимо самі
-    for (const r of s.rows) { r.decoLeft = null; r.decoRight = null; }
+    for (const r of s.rows) {
+      if (r.decoLeft && r.decoLeft.img) r.decoLeft.img.destroy();
+      if (r.decoRight && r.decoRight.img) r.decoRight.img.destroy();
+      r.decoLeft = null; r.decoRight = null;
+    }
     const idx = 5;
     const row = s.rows[idx];
-    row.decoLeft = { tree: true, inset: 15 };
+    row.decoLeft = { tree: true, inset: 15, variant: 0 };
     const y = idx * 8 /* ROW_H */ + s.scrollAccum;
-    const dx = row.left - row.decoLeft.inset;
+    // хітбокс тепер по масці PNG, а не по прямокутнику "на око" — тож
+    // потрібна реальна картинка (spawnDecoImages), і постріл цілимо точно
+    // в її центр, де точно є непрозорий піксель
+    s.spawnDecoImages(row, y);
+    const img = row.decoLeft.img;
     const scoreBefore = s.score;
-    const fakeMissile = { x: dx, y: y + 3, img: { destroy() {} }, normal: true };
+    const fakeMissile = { x: img.x, y: img.y, img: { destroy() {} }, normal: true };
     const hit = s.resolveMissileCollision(fakeMissile);
     return { hit, scoreDelta: s.score - scoreBefore, decoGone: row.decoLeft === null };
   });
@@ -233,6 +249,125 @@ async function waitForGameScene(page) {
     decoImgResult.spawnInfo.treeX === decoImgResult.spawnInfo.expectedTreeX &&
     decoImgResult.spawnInfo.bushX === decoImgResult.spawnInfo.expectedBushX &&
     decoImgResult.movedCorrectly && decoImgResult.treeDestroyedByShot && decoImgResult.bushDestroyedOnPop;
+
+  // ---------- 9) HOMING-бонус (M): лічильник 50, -1 за постріл, стекання
+  // при повторному підборі, вимкнення при 0 ----------
+  const homingResult = await page.evaluate(() => {
+    const s = window.game.scene.keys.Game;
+    for (const m of s.missiles) m.img.destroy();
+    s.missiles = [];
+    s.activePower = null;
+    s.homingCount = 0;
+
+    // "стріляє", напряму зводячи Phaser Key у стан JustDown (обходимо
+    // реальні DOM-події клавіатури — детерміновано й миттєво), і одразу
+    // прибирає випущені ракети, щоб наступний постріл не заблокувався
+    // перевіркою "this.missiles.length > 0" (не чекаємо реального польоту)
+    function fire() {
+      s.keys.SPACE._justDown = true;
+      s.handleShooting();
+      const count = s.missiles.length;
+      const anyHoming = s.missiles.some(m => m.homing);
+      for (const m of s.missiles) m.img.destroy();
+      s.missiles = [];
+      return { count, anyHoming };
+    }
+    const fakeBalloon = () => ({ x: 0, y: 0, letter: 'M', img: { destroy() {} }, label: { destroy() {} } });
+
+    s.balloons = [fakeBalloon()];
+    s.collectBalloon(s.balloons[0], 0);
+    const afterFirstPickup = { activePower: s.activePower, homingCount: s.homingCount };
+
+    const shot1 = fire();
+    fire(); fire();
+    const after3Shots = { activePower: s.activePower, homingCount: s.homingCount };
+    // HUD має показувати саме поточний лічильник (47) — перевіряємо тут,
+    // ДОКИ стан ще не змінився далі за текстом тесту
+    s.updateHUD();
+    const hudText = s.powerText.text;
+
+    // повторний підбір, поки лічильник ще не 0 — має ДОДАТИ 50
+    s.balloons = [fakeBalloon()];
+    s.collectBalloon(s.balloons[0], 0);
+    const afterSecondPickup = { activePower: s.activePower, homingCount: s.homingCount };
+
+    // добиваємо лічильник до нуля одним пострілом
+    s.homingCount = 1;
+    const lastHomingShot = fire();
+    const afterDepleted = { activePower: s.activePower, homingCount: s.homingCount };
+    const shotAfterDepleted = fire(); // тепер має бути звичайний одиночний постріл
+
+    return { afterFirstPickup, shot1, after3Shots, afterSecondPickup, lastHomingShot, afterDepleted, shotAfterDepleted, hudText };
+  });
+  console.log('9) HOMING-лічильник:', JSON.stringify(homingResult));
+  const okHoming =
+    homingResult.afterFirstPickup.activePower === 'missile' && homingResult.afterFirstPickup.homingCount === 50 &&
+    homingResult.shot1.count === 3 && homingResult.shot1.anyHoming === true &&
+    homingResult.after3Shots.activePower === 'missile' && homingResult.after3Shots.homingCount === 47 &&
+    homingResult.afterSecondPickup.activePower === 'missile' && homingResult.afterSecondPickup.homingCount === 97 &&
+    homingResult.lastHomingShot.anyHoming === true &&
+    homingResult.afterDepleted.activePower === null && homingResult.afterDepleted.homingCount === 0 &&
+    homingResult.shotAfterDepleted.count === 1 && homingResult.shotAfterDepleted.anyHoming === false &&
+    homingResult.hudText === 'HOMING ★ 47';
+
+  // ---------- 10) хітбокси по масці PNG (pixelHit), а не по прямокутнику
+  // "на око" ----------
+  const maskResult = await page.evaluate(() => {
+    const s = window.game.scene.keys.Game;
+    function findPixel(mask, pred) {
+      for (let y = 0; y < mask.height; y++)
+        for (let x = 0; x < mask.width; x++)
+          if (pred(mask.alpha[y * mask.width + x])) return { x, y };
+      return null;
+    }
+    const key = 'ship';
+    const mask = SPRITE_MASKS[key];
+    const opaque = findPixel(mask, a => a > 200);
+    const transparent = findPixel(mask, a => a === 0);
+
+    const img = s.add.image(200, 200, key); // без флипу/масштабу/кута — базовий кейс
+    const toWorld = (px, py) => ({ x: img.x + (px - mask.width / 2), y: img.y + (py - mask.height / 2) });
+
+    const opaqueWorld = toWorld(opaque.x, opaque.y);
+    const transparentWorld = toWorld(transparent.x, transparent.y);
+    const hitOpaque = pixelHit(img, opaqueWorld.x, opaqueWorld.y);
+    const hitTransparent = pixelHit(img, transparentWorld.x, transparentWorld.y);
+
+    // та сама непрозора точка, але картинка вдвічі більша — точка має
+    // масштабуватись разом з нею
+    img.setScale(2);
+    const opaqueWorld2x = { x: img.x + (opaque.x - mask.width / 2) * 2, y: img.y + (opaque.y - mask.height / 2) * 2 };
+    const hitOpaqueScaled = pixelHit(img, opaqueWorld2x.x, opaqueWorld2x.y);
+    img.setScale(1);
+
+    // дзеркалення: шукаємо НЕсиметричний непрозорий піксель у лівій половині
+    // картинки (px < width/2) і перевіряємо, що та сама світова точка після
+    // setFlipX(true) відповідає ДЗЕРКАЛЬНОМУ пікселю (width-1-px, py), а не
+    // тому самому — тобто pixelHit враховує flipX, а не просто ігнорує його
+    let asymmetric = null;
+    for (let y = 0; y < mask.height && !asymmetric; y++) {
+      for (let x = 0; x < Math.floor(mask.width / 2) && !asymmetric; x++) {
+        const a1 = mask.alpha[y * mask.width + x] > 20;
+        const a2 = mask.alpha[y * mask.width + (mask.width - 1 - x)] > 20;
+        if (a1 !== a2) asymmetric = { x, y, expectedWhenFlipped: a2 };
+      }
+    }
+    let flipResult = null;
+    if (asymmetric) {
+      const w = toWorld(asymmetric.x, asymmetric.y);
+      img.setFlipX(true);
+      const hitFlipped = pixelHit(img, w.x, w.y);
+      img.setFlipX(false);
+      flipResult = { expectedWhenFlipped: asymmetric.expectedWhenFlipped, hitFlipped };
+    }
+
+    img.destroy();
+    return { hitOpaque, hitTransparent, hitOpaqueScaled, flipResult };
+  });
+  console.log('10) хітбокс по масці (pixelHit):', JSON.stringify(maskResult));
+  const okPixelMask = maskResult.hitOpaque === true && maskResult.hitTransparent === false &&
+    maskResult.hitOpaqueScaled === true &&
+    (!maskResult.flipResult || maskResult.flipResult.hitFlipped === maskResult.flipResult.expectedWhenFlipped);
 
   // ---------- 7) вибух "росте", потім "зменшується", і безперервно
   // обертається за годинниковою стрілкою (не смикається назад) ----------
@@ -317,8 +452,11 @@ async function waitForGameScene(page) {
   console.log('okJetFlip:', okJetFlip);
   console.log('okNoFuelLabel:', okNoFuelLabel);
   console.log('okExplosionAnim:', okExplosionAnim);
+  console.log('okHoming:', okHoming);
+  console.log('okPixelMask:', okPixelMask);
 
   const allOk = errors.length === 0 && okIconsLoaded && okHeliFires && okHeliHits && okDecoDestroyed &&
-    okDecoImages && okRiverBendsMore && okJetFlip && okNoFuelLabel && okExplosionAnim;
+    okDecoImages && okRiverBendsMore && okJetFlip && okNoFuelLabel && okExplosionAnim &&
+    okHoming && okPixelMask;
   process.exitCode = allOk ? 0 : 1;
 })();
