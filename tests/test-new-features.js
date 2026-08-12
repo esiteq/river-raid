@@ -513,12 +513,17 @@ async function waitForTitleScene(page) {
   // поріг навмисно з великим запасом, щоб не бути крихким.
   const okRiverBendsMore = curveResult.maxAbsVel > 1.45 && curveResult.range > 80;
 
-  // ---------- 12) прохід повз острів завжди достатньо широкий для літака
-  // (мін. вдвічі ширше за хітбокс літака) — навіть коли ширина річки
-  // (halfWidth) "дихає" ПІД ЧАС активного острова, а не лише в момент його
-  // появи; раніше острів міг лишитись зі старою (широкою) половиною, поки
-  // річка тим часом звужувалась до мінімуму на високих рівнях — і прохід
-  // ставав фізично непролітним ----------
+  // ---------- 12) прохід повз острів завжди достатньо широкий (мін. вдвічі
+  // ширше за ВИДИМУ картинку літака, MIN_ISLAND_CHANNEL = PLAYER_VISUAL_WIDTH
+  // * 2 — не за вузький хітбокс-по-фюзеляжу PLAYER_HALF_W, вони навмисно
+  // розв'язані) — навіть коли ширина річки (halfWidth) "дихає" ПІД ЧАС
+  // активного острова, а не лише в момент його появи; раніше острів міг
+  // лишитись зі старою (широкою) половиною, поки річка тим часом звужувалась
+  // до мінімуму на високих рівнях — і прохід ставав фізично непролітним.
+  // impossibleRows рахуємо за РЕАЛЬНИМ критерієм колізії (isChannelSafe,
+  // тобто PLAYER_HALF_W) — це "чи фізично неможливо пролетіти", а
+  // minChannelSeen звіряємо з набагато щедрішим MIN_ISLAND_CHANNEL — це
+  // "чи виглядає прохід комфортно на око" ----------
   const islandResult = await page.evaluate(() => {
     const s = window.game.scene.keys.Game;
     const tg = s.terrainGen;
@@ -538,19 +543,46 @@ async function waitForTitleScene(page) {
           const channel = Math.min(leftChannel, rightChannel);
           if (channel < minChannelSeen) minChannelSeen = channel;
           // фактична перевірка прохідності — те саме, що isChannelSafe:
-          // хоч один із двох проходів має вміщати літака
+          // хоч один із двох проходів має вміщати вузький хітбокс-фюзеляж
           const leftOk = leftChannel > 2 * PLAYER_HALF_W;
           const rightOk = rightChannel > 2 * PLAYER_HALF_W;
           if (!leftOk && !rightOk) impossibleRows++;
         }
       }
     }
-    return { minChannelSeen, sawIsland, impossibleRows, MIN_ISLAND_CHANNEL, PLAYER_HALF_W };
+    return { minChannelSeen, sawIsland, impossibleRows, MIN_ISLAND_CHANNEL, PLAYER_HALF_W, PLAYER_VISUAL_WIDTH };
   });
   console.log('12) прохід повз острів:', JSON.stringify(islandResult));
   const okIslandChannel = islandResult.sawIsland === true && islandResult.impossibleRows === 0 &&
     islandResult.minChannelSeen >= islandResult.MIN_ISLAND_CHANNEL - 0.001 &&
-    islandResult.MIN_ISLAND_CHANNEL === islandResult.PLAYER_HALF_W * 4;
+    islandResult.MIN_ISLAND_CHANNEL === islandResult.PLAYER_VISUAL_WIDTH * 2;
+
+  // ---------- 17) колізія з берегом лише по фюзеляжу, не по крилах:
+  // PLAYER_HALF_W (реальна половина хітбокса) має бути помітно вужчим за
+  // половину видимої картинки літака (PLAYER_VISUAL_WIDTH/2) — і, що
+  // важливіше, isChannelSafe() реально пропускає гравця в прохід, який
+  // вмістив би тільки фюзеляж, але НЕ вмістив би повний розмах крил ----------
+  const fuselageResult = await page.evaluate(() => {
+    const s = window.game.scene.keys.Game;
+    const row = { left: 100, right: 400, islandLeft: null, islandRight: null, bridge: null };
+    // рівно на межі: трохи вужче за хітбокс — має бути НЕбезпечно
+    const unsafeAtHitboxEdge = s.isChannelSafe(row, 100 + (PLAYER_HALF_W - 2), PLAYER_HALF_W);
+    // трохи ширше за хітбокс, але вужче за половину розмаху крил —
+    // САМЕ ТА ситуація, яку просив користувач: крило "заходить" у берег,
+    // фюзеляж — ні, і це має рахуватись як безпечний проліт
+    const safeWithWingOverlap = s.isChannelSafe(row, 100 + (PLAYER_HALF_W + 2), PLAYER_HALF_W);
+    const wingGapX = 100 + (PLAYER_VISUAL_WIDTH / 2 - 2); // тут повний розмах крил уже НЕ поміщається
+    const safeAtNarrowerThanWingspan = s.isChannelSafe(row, wingGapX, PLAYER_HALF_W);
+    return {
+      unsafeAtHitboxEdge, safeWithWingOverlap, safeAtNarrowerThanWingspan,
+      PLAYER_HALF_W, PLAYER_VISUAL_WIDTH,
+    };
+  });
+  console.log('17) колізія лише по фюзеляжу:', JSON.stringify(fuselageResult));
+  const okFuselageOnly = fuselageResult.unsafeAtHitboxEdge === false &&
+    fuselageResult.safeWithWingOverlap === true &&
+    fuselageResult.safeAtNarrowerThanWingspan === true &&
+    fuselageResult.PLAYER_HALF_W < fuselageResult.PLAYER_VISUAL_WIDTH / 2 - 5; // помітно вужче за половину розмаху крил
 
   // ---------- 13) дерева/кущі розкидані по ВСІЙ зеленій смузі берега, а не
   // тільки тісною смужкою біля самої води (раніше inset був захардкоджений
@@ -634,10 +666,11 @@ async function waitForTitleScene(page) {
   console.log('okDecoSpread:', okDecoSpread);
   console.log('okFuelCap:', okFuelCap);
   console.log('okSand:', okSand);
+  console.log('okFuselageOnly:', okFuselageOnly);
 
   const allOk = errors.length === 0 && okIconsLoaded && okHeliFires && okHeliHits && okDecoDestroyed &&
     okDecoImages && okRiverBendsMore && okJetFlip && okNoFuelLabel && okExplosionAnim &&
     okHoming && okPixelMask && okTitleScreen && okIslandChannel && okDecoSpread && okFuelCap &&
-    okSand;
+    okSand && okFuselageOnly;
   process.exitCode = allOk ? 0 : 1;
 })();
