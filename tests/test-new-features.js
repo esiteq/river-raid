@@ -496,6 +496,71 @@ async function waitForTitleScene(page) {
   // поріг навмисно з великим запасом, щоб не бути крихким.
   const okRiverBendsMore = curveResult.maxAbsVel > 1.45 && curveResult.range > 80;
 
+  // ---------- 12) прохід повз острів завжди достатньо широкий для літака
+  // (мін. вдвічі ширше за хітбокс літака) — навіть коли ширина річки
+  // (halfWidth) "дихає" ПІД ЧАС активного острова, а не лише в момент його
+  // появи; раніше острів міг лишитись зі старою (широкою) половиною, поки
+  // річка тим часом звужувалась до мінімуму на високих рівнях — і прохід
+  // ставав фізично непролітним ----------
+  const islandResult = await page.evaluate(() => {
+    const s = window.game.scene.keys.Game;
+    const tg = s.terrainGen;
+    let minChannelSeen = Infinity;
+    let sawIsland = false;
+    let impossibleRows = 0;
+    // проганяємо через кілька рівнів (мінімальна ширина річки звужується з
+    // рівнем), щоб зловити саме найтісніший можливий випадок
+    for (let level = 1; level <= 10; level++) {
+      tg.setLevel(level);
+      for (let i = 0; i < 400; i++) {
+        const row = tg.nextRow(8);
+        if (row.islandLeft != null) {
+          sawIsland = true;
+          const leftChannel = row.islandLeft - row.left;
+          const rightChannel = row.right - row.islandRight;
+          const channel = Math.min(leftChannel, rightChannel);
+          if (channel < minChannelSeen) minChannelSeen = channel;
+          // фактична перевірка прохідності — те саме, що isChannelSafe:
+          // хоч один із двох проходів має вміщати літака
+          const leftOk = leftChannel > 2 * PLAYER_HALF_W;
+          const rightOk = rightChannel > 2 * PLAYER_HALF_W;
+          if (!leftOk && !rightOk) impossibleRows++;
+        }
+      }
+    }
+    return { minChannelSeen, sawIsland, impossibleRows, MIN_ISLAND_CHANNEL, PLAYER_HALF_W };
+  });
+  console.log('12) прохід повз острів:', JSON.stringify(islandResult));
+  const okIslandChannel = islandResult.sawIsland === true && islandResult.impossibleRows === 0 &&
+    islandResult.minChannelSeen >= islandResult.MIN_ISLAND_CHANNEL - 0.001 &&
+    islandResult.MIN_ISLAND_CHANNEL === islandResult.PLAYER_HALF_W * 4;
+
+  // ---------- 13) дерева/кущі розкидані по ВСІЙ зеленій смузі берега, а не
+  // тільки тісною смужкою біля самої води (раніше inset був захардкоджений
+  // 6-26px від берега незалежно від того, наскільки широка зелена смуга) ----------
+  const decoSpreadResult = await page.evaluate(() => {
+    const s = window.game.scene.keys.Game;
+    const tg = s.terrainGen;
+    const insets = [];
+    for (let i = 0; i < 2500; i++) {
+      const row = tg.nextRow(8);
+      if (row.decoLeft) insets.push(row.decoLeft.inset);
+      if (row.decoRight) insets.push(row.decoRight.inset);
+    }
+    return {
+      count: insets.length,
+      minInset: insets.length ? Math.min(...insets) : null,
+      maxInset: insets.length ? Math.max(...insets) : null,
+      farFromBankCount: insets.filter(v => v > 40).length, // за межами старого діапазону 6-26
+      DECO_EDGE_MARGIN,
+    };
+  });
+  console.log('13) розкид дерев/кущів по зеленій смузі:', JSON.stringify(decoSpreadResult));
+  const okDecoSpread = decoSpreadResult.count > 0 &&
+    decoSpreadResult.minInset >= decoSpreadResult.DECO_EDGE_MARGIN - 0.001 &&
+    decoSpreadResult.maxInset > 40 && // доводить, що це НЕ стара вузька смужка 6-26px
+    decoSpreadResult.farFromBankCount > 0;
+
   await browser.close();
   server.close();
 
@@ -512,9 +577,11 @@ async function waitForTitleScene(page) {
   console.log('okHoming:', okHoming);
   console.log('okPixelMask:', okPixelMask);
   console.log('okTitleScreen:', okTitleScreen);
+  console.log('okIslandChannel:', okIslandChannel);
+  console.log('okDecoSpread:', okDecoSpread);
 
   const allOk = errors.length === 0 && okIconsLoaded && okHeliFires && okHeliHits && okDecoDestroyed &&
     okDecoImages && okRiverBendsMore && okJetFlip && okNoFuelLabel && okExplosionAnim &&
-    okHoming && okPixelMask && okTitleScreen;
+    okHoming && okPixelMask && okTitleScreen && okIslandChannel && okDecoSpread;
   process.exitCode = allOk ? 0 : 1;
 })();

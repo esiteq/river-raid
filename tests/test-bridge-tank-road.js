@@ -1,9 +1,11 @@
-// Перевіряє новий сценарій мостового танка:
+// Перевіряє сценарій мостового танка:
 // 1) спочатку їде "дорогою" на березі (ще не на прольоті мосту)
 // 2) потім заїжджає на сам міст (tankOnBridge=true)
-// 3) якщо міст знищити ДО того, як танк проїхав — танк НЕ гине, а
-//    "застрягає" і починає стріляти, як звичайний танк на березі
-// 4) бонус x3 нараховується тільки якщо танк був САМЕ на прольоті мосту
+// 3) якщо міст знищити ДО того, як танк проїхав — танк гине РАЗОМ з мостом
+//    (вибух, а не "застрягання" й стрільба з води — це була знайдена помилка)
+// 4) бонус x3 нараховується тільки якщо танк був САМЕ на прольоті мосту;
+//    якщо танк загинув ще на дорозі — додатково нараховуються "звичайні"
+//    очки за сам танк (80), як і при прямому влучанні по ньому
 // Стан мосту/танка керується напряму через evaluate() (а не гонитвою за
 // таймінгом реального пострілу) — так сценарій детермінований і не залежить
 // від швидкості польоту ракети чи частоти кадрів у headless-браузері.
@@ -85,23 +87,17 @@ async function forceBridgeSpawn(page) {
     bridge.alive = false;
     bridge.hp = 0;
     s.addScore(tankBonus ? 1500 : 500);
-    if (tankStillEnRoute) s.strandBridgeTank(bridge);
-    return { score: s.score, tanksCount: s.tanks.length, tanks: s.tanks.map(t => ({ atBank: t.atBank, row: t.row })) };
+    if (tankStillEnRoute) s.destroyBridgeTank(bridge, tankBonus ? 0 : 80);
+    return {
+      score: s.score, tanksCount: s.tanks.length,
+      tankAlive: bridge.tankAlive, tankImgGone: bridge.tankImg === null
+    };
   });
   console.log('A) після знищення мосту (танк був на дорозі):', JSON.stringify(afterA));
 
   const scoreDeltaA = afterA.score - scoreBeforeA;
-  const okA_noTripleBonus = scoreDeltaA === 500; // не мало потроїтись, бо не був на прольоті
-  const okA_stranded = afterA.tanksCount > tanksBeforeA && afterA.tanks.some(t => t.atBank && t.row === null);
-
-  // чекаємо на постріл застряглого танка (реальний ігровий цикл далі йде своєю чергою)
-  let firedA = false;
-  for (let i = 0; i < 20; i++) {
-    await pageA.waitForTimeout(250);
-    const bullets = await pageA.evaluate(() => window.game.scene.keys.Game.tankBullets.length);
-    if (bullets > 0) { firedA = true; break; }
-  }
-  console.log('A) застряглий танк вистрелив:', firedA);
+  const okA_scoreWithTankBonus = scoreDeltaA === 580; // 500 за міст + 80 за танк (не був на прольоті — без x3)
+  const okA_destroyed = afterA.tankAlive === false && afterA.tankImgGone && afterA.tanksCount === tanksBeforeA;
   await pageA.close();
 
   // ---------- сценарій B: міст знищено, коли танк ВЖЕ на прольоті ----------
@@ -139,13 +135,16 @@ async function forceBridgeSpawn(page) {
     bridge.alive = false;
     bridge.hp = 0;
     s.addScore(tankBonus ? 1500 : 500);
-    if (tankStillEnRoute) s.strandBridgeTank(bridge);
-    return { score: s.score, tanksCount: s.tanks.length };
+    if (tankStillEnRoute) s.destroyBridgeTank(bridge, tankBonus ? 0 : 80);
+    return {
+      score: s.score, tanksCount: s.tanks.length,
+      tankAlive: bridge.tankAlive, tankImgGone: bridge.tankImg === null
+    };
   });
   console.log('B) після знищення мосту (танк був на прольоті):', JSON.stringify(afterB));
   const scoreDeltaB = afterB.score - scoreBeforeB;
-  const okB_tripleBonus = scoreDeltaB === 1500;
-  const okB_stranded = afterB.tanksCount > tanksBeforeB;
+  const okB_tripleBonus = scoreDeltaB === 1500; // x3 за танк на прольоті, без додаткових очок
+  const okB_destroyed = afterB.tankAlive === false && afterB.tankImgGone && afterB.tanksCount === tanksBeforeB;
   await pageB.close();
 
   // ---------- сценарій C: танк повністю проїжджає міст (втікає) ----------
@@ -185,15 +184,14 @@ async function forceBridgeSpawn(page) {
 
   console.log('ERRORS:', errors.length ? errors.join('\n') : 'none');
   console.log('okA_startsOnRoad:', okA_startsOnRoad);
-  console.log('okA_noTripleBonus:', okA_noTripleBonus, `(delta=${scoreDeltaA})`);
-  console.log('okA_stranded:', okA_stranded);
-  console.log('okA_fired:', firedA);
+  console.log('okA_scoreWithTankBonus:', okA_scoreWithTankBonus, `(delta=${scoreDeltaA})`);
+  console.log('okA_destroyed:', okA_destroyed);
   console.log('okB_onBridgeReached:', onBridgeReached);
   console.log('okB_tripleBonus:', okB_tripleBonus, `(delta=${scoreDeltaB})`);
-  console.log('okB_stranded:', okB_stranded);
+  console.log('okB_destroyed:', okB_destroyed);
   console.log('okC_escapedCleanly:', okC_escapedCleanly);
 
-  const allOk = errors.length === 0 && okA_startsOnRoad && okA_noTripleBonus && okA_stranded && firedA &&
-    onBridgeReached && okB_tripleBonus && okB_stranded && okC_escapedCleanly;
+  const allOk = errors.length === 0 && okA_startsOnRoad && okA_scoreWithTankBonus && okA_destroyed &&
+    onBridgeReached && okB_tripleBonus && okB_destroyed && okC_escapedCleanly;
   process.exitCode = allOk ? 0 : 1;
 })();

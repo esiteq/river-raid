@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 // версія гри — показується на тайтл-екрані ("vX.Y by Alex Raven"). Онови
 // цей рядок разом із записом у CHANGELOG.md при кожній помітній зміні.
-const GAME_VERSION = '1.15';
+const GAME_VERSION = '1.17';
 
 const W = 480;
 // ігрове поле займає всю висоту екрана: беремо реальну висоту вікна
@@ -26,6 +26,7 @@ const ROWS_COUNT = Math.ceil(H / ROW_H) + 6;
 const PLAYER_Y = H - 130;              // фіксована екранна Y-позиція гравця
 const PLAYER_HALF_W = 11;              // половина ширини хітбокса літака
 const PLAYER_SPEED_X = 230;            // px/сек, бічний рух
+const MIN_ISLAND_CHANNEL = PLAYER_HALF_W * 4; // прохід повз острів має бути мін. вдвічі ширшим за літак (2 * ширина хітбокса)
 
 const MIN_SPEED = 16;                  // мін. швидкість скролу (px/сек) — майже зупинка для заправки
 const CRUISE_SPEED = 130;              // швидкість старту/респавну
@@ -71,6 +72,7 @@ const EXPLO_ROTATION_SPEED = 900;  // град/сек → рівно один п
 // (очки/блокування танків) впливає лише сам тип tree/bush, як і раніше.
 const DECO_TREE_KEYS = ['tree1', 'tree2'];
 const DECO_BUSH_KEYS = ['bush1', 'bush2'];
+const DECO_EDGE_MARGIN = 16; // мін. відстань дерева/куща від берега і від краю екрана (щоб не влазило у воду й не вилазило за кадр)
 
 
 const MISSILE_SPEED = 520;
@@ -313,11 +315,20 @@ class TerrainGen {
           this.islandActive = true;
           this.islandPhase = 'grow';
           this.islandHalf = 0;
-          this.islandTargetHalf = Phaser.Math.Between(20, Math.max(20, Math.min(58, this.halfWidth - 74)));
+          this.islandTargetHalf = Phaser.Math.Between(20, Math.max(20, Math.min(58, this.halfWidth - MIN_ISLAND_CHANNEL)));
           this.islandRowsLeft = Phaser.Math.Between(45, 85);
         }
       }
       if (this.islandActive) {
+        // halfWidth і далі "дихає" (звужується/розширюється) поки острів
+        // активний — тож на кожному рядку перераховуємо максимально
+        // безпечну половину острова, щоб з обох боків завжди лишався
+        // прохід шириною не менше MIN_ISLAND_CHANNEL. Без цього острів міг
+        // "з'їсти" прохід, коли річка тим часом звужувалась, і річку
+        // ставало фізично неможливо пролетіти.
+        const maxSafeIslandHalf = Math.max(0, this.halfWidth - MIN_ISLAND_CHANNEL);
+        if (this.islandTargetHalf > maxSafeIslandHalf) this.islandTargetHalf = maxSafeIslandHalf;
+
         if (this.islandPhase === 'grow') {
           this.islandHalf += 3;
           if (this.islandHalf >= this.islandTargetHalf) { this.islandHalf = this.islandTargetHalf; this.islandPhase = 'hold'; }
@@ -331,6 +342,11 @@ class TerrainGen {
             this.islandCooldown = Phaser.Math.Between(70, 150);
           }
         }
+        // додатковий запобіжник: острів не повинен перевищувати поточну
+        // безпечну межу, навіть якщо ми не в фазі "grow" (річка могла
+        // звузитись саме зараз, у фазі hold/shrink)
+        if (this.islandActive && this.islandHalf > maxSafeIslandHalf) this.islandHalf = maxSafeIslandHalf;
+
         if (this.islandActive && this.islandHalf > 4) {
           islandLeft = this.centerX - this.islandHalf;
           islandRight = this.centerX + this.islandHalf;
@@ -353,22 +369,30 @@ class TerrainGen {
       this.bridgeRowsLeft--;
     }
 
-    // --- дерева/кущі на берегах ---
+    // --- дерева/кущі на зеленій частині берега ---
     // з'являються з випадковим інтервалом на кожному березі окремо, щоб не
     // тулитись одне до одного; вимкнено біля мостів і на "заморожених"
-    // рядках, щоб не заважати конструкції моста
+    // рядках, щоб не заважати конструкції моста.
+    // inset — відстань від берега (не від краю екрана!), тож розкидані по
+    // ВСІЙ ширині зеленої смуги (від берега аж до краю екрана), а не тільки
+    // тісною смужкою біля самої води, як було раніше.
     let decoLeft = null, decoRight = null;
     if (!frozen && !bridgeRef) {
+      const leftGreenW = this.centerX - this.halfWidth; // ширина зеленої смуги зліва (0..row.left)
+      const rightGreenW = W - (this.centerX + this.halfWidth); // те саме справа
+      const leftInsetMax = Math.max(DECO_EDGE_MARGIN, leftGreenW - DECO_EDGE_MARGIN);
+      const rightInsetMax = Math.max(DECO_EDGE_MARGIN, rightGreenW - DECO_EDGE_MARGIN);
+
       this.decoLeftCooldown--;
       if (this.decoLeftCooldown <= 0) {
         // variant — який саме з двох PNG-варіантів свого типу показати
         // (tree1/tree2 чи bush1/bush2), суто візуальна різноманітність
-        decoLeft = { tree: Phaser.Math.Between(0, 1) === 0, inset: Phaser.Math.Between(6, 26), variant: Phaser.Math.Between(0, 1) };
+        decoLeft = { tree: Phaser.Math.Between(0, 1) === 0, inset: Phaser.Math.Between(DECO_EDGE_MARGIN, leftInsetMax), variant: Phaser.Math.Between(0, 1) };
         this.decoLeftCooldown = Phaser.Math.Between(7, 18);
       }
       this.decoRightCooldown--;
       if (this.decoRightCooldown <= 0) {
-        decoRight = { tree: Phaser.Math.Between(0, 1) === 0, inset: Phaser.Math.Between(6, 26), variant: Phaser.Math.Between(0, 1) };
+        decoRight = { tree: Phaser.Math.Between(0, 1) === 0, inset: Phaser.Math.Between(DECO_EDGE_MARGIN, rightInsetMax), variant: Phaser.Math.Between(0, 1) };
         this.decoRightCooldown = Phaser.Math.Between(7, 18);
       }
     }
@@ -856,8 +880,8 @@ class GameScene extends Phaser.Scene {
 
     // танк: як в оригіналі, спочатку їде по дорозі на березі, і тільки
     // потім заїжджає на сам міст і перетинає його. Якщо встигнути знищити
-    // міст ДО того, як танк доїхав по мосту до кінця — очки потроюються;
-    // сам танк при цьому більше НЕ гине разом з мостом (strandBridgeTank).
+    // міст ДО того, як танк доїхав по мосту до кінця — очки потроюються,
+    // а сам танк гине разом з мостом (destroyBridgeTank).
     if (width > 70) {
       bridge.tankAlive = true;
       bridge.tankOnBridge = false; // ще на "дорозі", чи вже заїхав на проліт
@@ -880,22 +904,16 @@ class GameScene extends Phaser.Scene {
     }
   }
 
-  // Танк не встиг переїхати міст до того, як його знищили — не гине разом
-  // з мостом, а "застрягає" і продовжує жити як звичайний танк на березі:
-  // більше нікуди не їде (row: null), одразу вважається запаркованим і
-  // стріляє в тому ж напрямку, в якому рухався.
-  strandBridgeTank(bridge) {
+  // Танк не встиг переїхати міст до того, як його знищили — гине разом з
+  // мостом (вибух + звук), а не "застрягає" на воді, як раніше.
+  destroyBridgeTank(bridge, score = 0) {
     if (!bridge.tankImg) return;
-    this.tanks.push({
-      img: bridge.tankImg,
-      side: bridge.tankDir === 1 ? 'left' : 'right',
-      x: bridge.tankImg.x, y: bridge.tankImg.y,
-      row: null,
-      atBank: true,
-      fireTimer: Phaser.Math.FloatBetween(1.2, 2.4)
-    });
-    bridge.tankAlive = false;
+    this.spawnExplosion(bridge.tankImg.x, bridge.tankImg.y);
+    SFX.explode();
+    if (score) this.addScore(score);
+    bridge.tankImg.destroy();
     bridge.tankImg = null;
+    bridge.tankAlive = false;
   }
 
   updateBridgeVisuals(scrollDelta, dt) {
@@ -910,9 +928,10 @@ class GameScene extends Phaser.Scene {
 
       if (bridge.tankAlive && bridge.tankImg) {
         if (!bridge.alive) {
-          // міст зруйновано, поки танк ще їхав дорогою або мостом —
-          // застрягає на місці й починає стріляти замість того, щоб зникнути
-          this.strandBridgeTank(bridge);
+          // міст зруйновано, поки танк ще їхав дорогою або мостом — гине
+          // разом з мостом (safety net на випадок, якщо смерть мосту чомусь
+          // не пройшла через resolveMissileCollision)
+          this.destroyBridgeTank(bridge);
         } else {
           const span = Math.max(1, Math.abs(bridge.tankEndX - bridge.tankStartX));
           bridge.tankProgress += (bridge.tankSpeed * dt) / span;
@@ -1152,9 +1171,7 @@ class GameScene extends Phaser.Scene {
         // зупинився перед деревом
         t.atBank = Math.abs(t.x - bankX) < 1;
       }
-      // синхронізуємо спрайт з x/y завжди, навіть без "row" — так тримають
-      // себе застряглі мостові танки (strandBridgeTank): вони вже
-      // запарковані й нікуди не їдуть, але й далі скролюються вниз
+      // синхронізуємо спрайт з x/y завжди, навіть без "row"
       t.img.x = t.x;
       t.img.y = t.y;
 
@@ -1544,12 +1561,10 @@ class GameScene extends Phaser.Scene {
         this.centerMsg.setText('LEVEL ' + this.level + '\nТАНК НА МОСТУ! x3 ОЧОК');
         this.levelFlashTimer = 1.9;
       }
-      // танк більше НЕ гине разом з мостом: якщо він ще не встиг проїхати
-      // (був на дорозі чи на прольоті) — застрягає і починає стріляти, як
-      // звичайний танк на березі (updateBridgeVisuals це теж підхопить на
-      // наступному кадрі через bridge.alive === false, але тут робимо це
-      // одразу, щоб не було зайвого кадру затримки)
-      if (tankStillEnRoute) this.strandBridgeTank(bridge);
+      // танк гине разом з мостом, якщо ще не встиг проїхати (був на дорозі
+      // чи на прольоті); якщо це саме той момент, коли бонус x3 нарахований
+      // за танк на прольоті — окремих очок за сам танк вже не додаємо
+      if (tankStillEnRoute) this.destroyBridgeTank(bridge, tankBonus ? 0 : 80);
       return true;
     }
 
