@@ -10,9 +10,10 @@
 // ---------------------------------------------------------------------------
 // КОНСТАНТИ
 // ---------------------------------------------------------------------------
-// версія гри — показується на тайтл-екрані ("vX.Y by Alex Raven"). Онови
-// цей рядок разом із записом у CHANGELOG.md при кожній помітній зміні.
-const GAME_VERSION = '1.21';
+// версія гри — показується на тайтл-екрані ("vX.Y · by Alex Raven · GitHub",
+// де "GitHub" — клікабельне посилання на репозиторій). Онови цей рядок разом
+// із записом у CHANGELOG.md при кожній помітній зміні.
+const GAME_VERSION = '1.22';
 
 const W = 480;
 // ігрове поле займає всю висоту екрана: беремо реальну висоту вікна
@@ -615,9 +616,34 @@ class TitleScene extends Phaser.Scene {
       fontFamily: 'Courier New, monospace', fontSize: '19px', fontStyle: 'bold', color: '#ffe066'
     }).setOrigin(0.5);
 
-    this.add.text(W / 2, 582, `v${GAME_VERSION} by Alex Raven`, {
-      fontFamily: 'Courier New, monospace', fontSize: '12px', color: '#5a7089'
-    }).setOrigin(0.5);
+    // рядок копірайту з посиланням на GitHub: "vX.Y · by Alex Raven · GitHub" —
+    // складається з кількох окремих text-об'єктів (щоб лише "GitHub" був
+    // клікабельним), вирівняних у ряд і відцентрованих як єдине ціле
+    {
+      const footerStyle = { fontFamily: 'Courier New, monospace', fontSize: '12px', color: '#5a7089' };
+      const sepStyle = { fontFamily: 'Courier New, monospace', fontSize: '12px', color: '#3f5265' };
+      const linkColor = '#7fb2e0';
+      const linkHoverColor = '#a8d0ff';
+
+      const tVer = this.add.text(0, 582, `v${GAME_VERSION}`, footerStyle).setOrigin(0, 0.5);
+      const tSep1 = this.add.text(0, 582, ' · ', sepStyle).setOrigin(0, 0.5);
+      const tBy = this.add.text(0, 582, 'by Alex Raven', footerStyle).setOrigin(0, 0.5);
+      const tSep2 = this.add.text(0, 582, ' · ', sepStyle).setOrigin(0, 0.5);
+      const tGh = this.add.text(0, 582, 'GitHub', { ...footerStyle, color: linkColor }).setOrigin(0, 0.5);
+
+      const totalWidth = tVer.width + tSep1.width + tBy.width + tSep2.width + tGh.width;
+      let fx = W / 2 - totalWidth / 2;
+      tVer.x = fx; fx += tVer.width;
+      tSep1.x = fx; fx += tSep1.width;
+      tBy.x = fx; fx += tBy.width;
+      tSep2.x = fx; fx += tSep2.width;
+      tGh.x = fx;
+
+      tGh.setInteractive({ useHandCursor: true });
+      tGh.on('pointerover', () => tGh.setColor(linkHoverColor));
+      tGh.on('pointerout', () => tGh.setColor(linkColor));
+      tGh.on('pointerdown', () => window.open('https://github.com/esiteq/river-raid', '_blank'));
+    }
 
     this.tweens.add({ targets: this.blink, alpha: 0.15, duration: 550, yoyo: true, repeat: -1 });
 

@@ -25,8 +25,9 @@
 //     постріл у непрозору точку — влучання; враховує масштаб і дзеркалення
 // 11) тайтл-екран: картинка гравця й текст керування більше не перекриваються
 //     (getBounds() обох об'єктів не перетинаються), кнопка старту —
-//     "НАТИСНІТЬ ПРОБІЛ ДЛЯ ПОЧАТКУ", і під нею є рядок версії
-//     "vX.Y by Alex Raven"
+//     "НАТИСНІТЬ ПРОБІЛ ДЛЯ ПОЧАТКУ", і під нею рядок з версією, "by Alex
+//     Raven" та клікабельним посиланням "GitHub" (окремі text-об'єкти,
+//     складені в один візуальний рядок)
 const { chromium } = require('playwright');
 const path = require('path');
 const { startServer } = require('./serve');
@@ -76,7 +77,9 @@ async function waitForTitleScene(page) {
     const texts = children.filter(c => c.type === 'Text');
     const controlsText = texts.find(c => c.text.includes('рух літака'));
     const startText = texts.find(c => c.text.includes('ПРОБІЛ'));
-    const versionText = texts.find(c => c.text.startsWith('v') && c.text.includes('by Alex Raven'));
+    const versionText = texts.find(c => /^v\d+\.\d+$/.test(c.text));
+    const byText = texts.find(c => c.text === 'by Alex Raven');
+    const ghText = texts.find(c => c.text === 'GitHub');
     const playerBounds = playerImg.getBounds();
     const controlsBounds = controlsText.getBounds();
     // прямокутники НЕ перетинаються, якщо один повністю по один бік від
@@ -85,11 +88,21 @@ async function waitForTitleScene(page) {
                         controlsBounds.bottom <= playerBounds.top ||
                         controlsBounds.left >= playerBounds.right ||
                         controlsBounds.right <= playerBounds.left);
+    // "GitHub" має бути на тій самій висоті (одна лінія) і правіше, ніж
+    // "v1.22"/"by Alex Raven" — тобто складений у той самий рядок праворуч
+    const sameLine = ghText && versionText && Math.abs(ghText.y - versionText.y) < 1;
+    const rightOfVersion = ghText && versionText && ghText.x > versionText.x;
+    const ghClickable = ghText ? (ghText.input && ghText.input.enabled === true) : false;
     return {
       active: true,
       overlaps,
       startText: startText ? startText.text : null,
       versionText: versionText ? versionText.text : null,
+      byText: byText ? byText.text : null,
+      ghText: ghText ? ghText.text : null,
+      sameLine,
+      rightOfVersion,
+      ghClickable,
       playerBounds: { top: Math.round(playerBounds.top), bottom: Math.round(playerBounds.bottom) },
       controlsBounds: { top: Math.round(controlsBounds.top), bottom: Math.round(controlsBounds.bottom) },
     };
@@ -97,7 +110,12 @@ async function waitForTitleScene(page) {
   console.log('11) тайтл-екран:', JSON.stringify(titleResult));
   const okTitleScreen = titleResult.active === true && titleResult.overlaps === false &&
     titleResult.startText === 'НАТИСНІТЬ ПРОБІЛ ДЛЯ ПОЧАТКУ' &&
-    /^v\d+\.\d+ by Alex Raven$/.test(titleResult.versionText || '');
+    /^v\d+\.\d+$/.test(titleResult.versionText || '') &&
+    titleResult.byText === 'by Alex Raven' &&
+    titleResult.ghText === 'GitHub' &&
+    titleResult.sameLine === true &&
+    titleResult.rightOfVersion === true &&
+    titleResult.ghClickable === true;
 
   await waitForGameScene(page);
   await page.keyboard.press('Space');
