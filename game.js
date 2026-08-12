@@ -13,7 +13,7 @@
 // версія гри — показується на тайтл-екрані ("vX.Y · by Alex Raven · GitHub",
 // де "GitHub" — клікабельне посилання на репозиторій). Онови цей рядок разом
 // із записом у CHANGELOG.md при кожній помітній зміні.
-const GAME_VERSION = '1.23';
+const GAME_VERSION = '1.26';
 
 const W = 480;
 // ігрове поле займає всю висоту екрана: беремо реальну висоту вікна
@@ -37,11 +37,18 @@ const PLAYER_VISUAL_WIDTH = 45;        // повна видима ширина �
 // місця, а не тільки технічно проскакує повз графіку
 const MIN_ISLAND_CHANNEL = PLAYER_VISUAL_WIDTH * 2;
 
-// іконка літака біля напису "LIVES" у нижньому HUD (не плутати з
+// іконка літака біля числа життів у нижньому HUD (не плутати з
 // PLAYER_SCALE/PLAYER_VISUAL_WIDTH — це для гри, тут окремий, набагато
-// менший розмір, підігнаний під висоту HUD-шрифту 18px)
+// менший розмір, підігнаний під висоту HUD-шрифту 18px). Саме слово "LIVES"
+// прибрано — іконка й так однозначно пояснює, що це за число.
 const LIVES_ICON_SIZE = 18;
-const LIVES_ICON_GAP = 6;              // відступ між іконкою і текстом "LIVES N"
+const LIVES_ICON_GAP = 6;              // відступ між іконкою і цифрою кількості життів
+
+// іконка бочки пального замість напису "FUEL" зліва від смуги пального —
+// пропорції навмисно збережені близько до нативних 26x36 (FUEL_SCALE),
+// щоб бочка не виглядала сплюснутою/розтягнутою в маленькому розмірі HUD
+const FUEL_ICON_WIDTH = 22;
+const FUEL_ICON_HEIGHT = 30;
 
 const MIN_SPEED = 16;                  // мін. швидкість скролу (px/сек) — майже зупинка для заправки
 const CRUISE_SPEED = 130;              // швидкість старту/респавну
@@ -71,6 +78,19 @@ const SHIP_SCALE = 1;                // → 52x31 (нативний розмір
 const FUEL_SCALE = 1;                // → 26x36 (нативний розмір)
 const HOMING_MISSILE_SCALE = 1;      // → 6x32 (нативний розмір; лише ракети самонаведення)
 
+// Бічні гойдання гелікоптера (updateEnemies()): раніше амплітуда була
+// фіксована (~20px навколо точки спавну) — тепер кожен гелікоптер отримує
+// СВОЮ рандомну амплітуду в діапазоні [HELI_AMP_MIN, HELI_AMP_MAX], але
+// затиснуту при спавні так, щоб розмах ніколи не виводив його за межі
+// ігрового поля (0..W), незалежно від того, де саме він з'явився.
+// HELI_SWAY_SPEED — ПІКОВА бічна швидкість (px/сек), яку кутова швидкість
+// підлаштовує під конкретну амплітуду (spawnEnemy()), щоб великий розмах не
+// робив гелікоптер підозріло швидким — він просто довше летить "в один бік".
+const HELI_AMP_MIN = 30;
+const HELI_AMP_MAX = 170;
+const HELI_AMP_MARGIN = 30;          // мін. відстань від краю екрана (≈половина ширини іконки)
+const HELI_SWAY_SPEED = 40;          // px/сек — той самий пік, що й у старій формулі vx = cos(phase)*40
+
 // Анімація вибуху ('explo', spawnExplosion()/updateExplosions()): "росте" до
 // половини тривалості, потім "зменшується" назад, і весь час обертається за
 // годинниковою стрілкою.
@@ -97,6 +117,14 @@ const MISSILE_SPEED = 520;
 // куля; якщо підібрати ще одну, поки лічильник ще не вичерпаний, додається
 // стільки ж ЗВЕРХУ наявної кількості (не перезаписує)
 const HOMING_BONUS_AMOUNT = 50;
+// збита куля-бонус (popBalloon()) більше НЕ активує ефект одразу — на її
+// місці лишається жовте коло з тією ж літерою (spawnBonusPickup()), і сам
+// ефект (applyBonusEffect()) вмикається лише коли гравець залітає в це
+// коло (updateBonusPickups()). BONUS_PICKUP_RADIUS — радіус кола (і зона
+// підбору навколо нього, за тим самим патерном, що й радіус заправки);
+// BONUS_PICKUP_BREATH_SPEED — швидкість "дихання" кольору (рад/сек)
+const BONUS_PICKUP_RADIUS = 17;
+const BONUS_PICKUP_BREATH_SPEED = 2.2;
 const FUEL_MAX = 100;
 const FUEL_DRAIN_BASE = 2.0;           // одиниць/сек на мін. швидкості
 const FUEL_DRAIN_MAX = 5.2;            // одиниць/сек на макс. швидкості
@@ -114,9 +142,15 @@ const COL = {
   waterBlue: 0x1560c4,
   landGreen: 0x0e6b1a, landGreenEdge: 0x18a02a,
   sand: 0xe0b64a,
+  // "дихаюче" жовте коло-підбирач бонуса (лишається на місці збитої кульки,
+  // updateBonusPickups() плавно лерпить fillColor між цими двома)
+  pickupYellowDark: 0xb8860b, pickupYellowLight: 0xffe066,
+  pickupText: 0x2b2000,
   bridgeGray: 0x9aa0a6, bridgeDark: 0x555b60,
   exploYellow: 0xffe066, exploOrange: 0xff8c42, exploRed: 0xe03c3c,
-  hudGreen: 0x39ff6a,
+  // раніше hudGreen: 0x39ff6a — HUD-написи (SCORE/LEVEL/lives) перефарбовано
+  // з зеленого в жовтий, бо на деяких фонах зелений погано читався
+  hudYellow: 0xffe066,
   tankBody: 0x5a6b2f, tankDark: 0x38431c, tankBarrel: 0x24291a,
   prideRed: 0xe4032e, prideOrange: 0xff8c1a, prideYellow: 0xffed4a,
   prideGreen: 0x2ecc40, prideBlue: 0x1f6feb, pridePurple: 0x8a3fe0,
@@ -515,6 +549,19 @@ function pixelHit(img, worldX, worldY) {
   return mask.alpha[py * mask.width + px] > 20; // поріг відсікає майже прозорі краї (антиаліасинг)
 }
 
+// лінійна інтерполяція між двома 0xRRGGBB кольорами (t: 0..1) — власна
+// реалізація замість Phaser.Display.Color.Interpolate, щоб не тягнути
+// проміжні Color-об'єкти щокадру лише заради одного числа; використовує
+// updateBonusPickups() для "дихання" кольору кола-підбирача бонуса
+function lerpColor(colorA, colorB, t) {
+  const r1 = (colorA >> 16) & 0xff, g1 = (colorA >> 8) & 0xff, b1 = colorA & 0xff;
+  const r2 = (colorB >> 16) & 0xff, g2 = (colorB >> 8) & 0xff, b2 = colorB & 0xff;
+  const r = Math.round(r1 + (r2 - r1) * t);
+  const g = Math.round(g1 + (g2 - g1) * t);
+  const b = Math.round(b1 + (b2 - b1) * t);
+  return (r << 16) | (g << 8) | b;
+}
+
 // ---------------------------------------------------------------------------
 // BOOT SCENE — генерація текстур
 // ---------------------------------------------------------------------------
@@ -706,6 +753,10 @@ class GameScene extends Phaser.Scene {
     this.tankBullets = [];  // снаряди танків {img, x, y, vx, vy}
     this.heliBullets = [];  // снаряди гелікоптерів {img, x, y, vx, vy}
     this.balloons = [];     // бонусні кульки {img, label, letter, x, y}
+    // жовті кола-підбирачі, що лишаються на місці збитої кульки — ефект
+    // бонуса активується не одразу, а коли гравець залітає в коло (дивись
+    // popBalloon()/spawnBonusPickup()/updateBonusPickups()/applyBonusEffect())
+    this.bonusPickups = []; // {circle, label, letter, x, y, phase}
     this.missiles = [];     // ракети гравця {img, x, y, vx, vy, homing, target}
     this.explosions = [];
     this.activePower = null; // null | 'triple' | 'missile' | 'double'
@@ -728,15 +779,20 @@ class GameScene extends Phaser.Scene {
     this.spaceLock = false;
 
     // --- HUD ---
-    const hudStyle = { fontFamily: 'Courier New, monospace', fontSize: '18px', color: '#39ff6a', fontStyle: 'bold' };
+    // жовтий, а не зелений (як було раніше, #39ff6a) — на деяких ділянках
+    // фону (яскраво-зелений берег/дерева) зелений напис зливався з тлом і
+    // погано читався
+    const hudStyle = { fontFamily: 'Courier New, monospace', fontSize: '18px', color: '#ffe066', fontStyle: 'bold' };
     this.scoreText = this.add.text(10, 8, 'SCORE 0', hudStyle).setDepth(30);
     this.levelText = this.add.text(W - 10, 8, 'LEVEL 1', hudStyle).setOrigin(1, 0).setDepth(30);
     this.powerText = this.add.text(W / 2, 8, '', {
       fontFamily: 'Courier New, monospace', fontSize: '15px', fontStyle: 'bold', color: '#ff6ad5'
     }).setOrigin(0.5, 0).setDepth(30);
     // нижній ряд HUD: паливо зліва, кількість життів (текст + іконка
-    // літака) справа — обидва на одній Y (H - 20), як єдиний нижній "пояс"
-    this.fuelLabel = this.add.text(10, H - 26, 'FUEL', { fontFamily: 'Courier New, monospace', fontSize: '14px', color: '#cfe8ff' }).setDepth(30);
+    // літака) справа — обидва на одній Y (H - 20), як єдиний нижній "пояс".
+    // Замість напису "FUEL" — іконка бочки (та сама текстура 'fuel', що й
+    // на самих заправках, що падають у грі) — впізнавана без слів.
+    this.fuelIcon = this.add.image(10, H - 20, 'fuel').setOrigin(0, 0.5).setDisplaySize(FUEL_ICON_WIDTH, FUEL_ICON_HEIGHT).setDepth(30);
     this.fuelBarBg = this.add.rectangle(58, H - 20, 200, 14, 0x223344).setOrigin(0, 0.5).setDepth(30).setStrokeStyle(2, 0x0a1a2a);
     this.fuelBarFill = this.add.rectangle(60, H - 20, 196, 10, 0xffcc00).setOrigin(0, 0.5).setDepth(30);
     // текст завжди "приклеєний" правим краєм до W-10 (setOrigin(1, 0.5)),
@@ -762,7 +818,9 @@ class GameScene extends Phaser.Scene {
   updateHUD() {
     this.scoreText.setText('SCORE ' + this.score);
     this.levelText.setText('LEVEL ' + this.level);
-    this.livesText.setText('LIVES ' + Math.max(0, this.lives));
+    // без слова "LIVES" — іконка літака поруч і так пояснює, що це кількість
+    // життів, сама цифра лишається достатньою
+    this.livesText.setText(String(Math.max(0, this.lives)));
     // іконка одразу ліворуч від щойно виставленого тексту (right-origin
     // тексту лишається на місці, тож перераховуємо тільки позицію іконки)
     this.livesIcon.x = this.livesText.x - this.livesText.width - LIVES_ICON_GAP - this.livesIcon.displayWidth / 2;
@@ -889,6 +947,7 @@ class GameScene extends Phaser.Scene {
     this.updateTankBullets(dt);
     this.updateHeliBullets(dt);
     this.updateBalloons(scrollDelta, dt);
+    this.updateBonusPickups(scrollDelta, dt);
     this.updateSpawners(dt);
     this.updateMissiles(dt);
     this.updateExplosions(dt);
@@ -1124,6 +1183,24 @@ class GameScene extends Phaser.Scene {
     if (type === 'heli') {
       // гелікоптери стріляють по гравцю, як в оригінальній River Raid
       enemy.fireTimer = Phaser.Math.FloatBetween(1.6, 2.8);
+      // рандомна амплітуда бічних гойдань, затиснута під точку спавну —
+      // maxAmpLeft/maxAmpRight це найбільший розмах у кожен бік, який ще
+      // НЕ виведе гелікоптер за HELI_AMP_MARGIN від краю екрана; якщо
+      // спавн стався майже впритул до краю, amp може вийти й 0 (просто
+      // летить прямо, без гойдання) — це очікуваний, безпечний випадок,
+      // а не баг
+      enemy.baseX = enemy.x;
+      const maxAmpLeft = enemy.baseX - HELI_AMP_MARGIN;
+      const maxAmpRight = (W - HELI_AMP_MARGIN) - enemy.baseX;
+      const desiredAmp = Phaser.Math.Between(HELI_AMP_MIN, HELI_AMP_MAX);
+      enemy.amp = Phaser.Math.Clamp(Math.min(desiredAmp, maxAmpLeft, maxAmpRight), 0, HELI_AMP_MAX);
+      // кутова швидкість підібрана так, щоб ПІКОВА бічна швидкість
+      // (amp * angSpeed) лишалась приблизно сталою (HELI_SWAY_SPEED)
+      // незалежно від амплітуди — великий розмах просто триває довше,
+      // а не робить рух різким; клампимо саму кутову швидкість окремо,
+      // щоб дуже маленька amp (майже 0) не дала аномально швидке дрібне
+      // тремтіння
+      enemy.angSpeed = Phaser.Math.Clamp(HELI_SWAY_SPEED / Math.max(enemy.amp, 8), 0.4, 3);
     }
     this.enemies.push(enemy);
   }
@@ -1202,10 +1279,23 @@ class GameScene extends Phaser.Scene {
       if (!e.alive) continue;
       e.y += scrollDelta;
       if (e.type === 'heli') {
-        e.phase += dt * 2;
-        const vx = Math.cos(e.phase) * 40;
-        e.x += vx * dt;
-        e.img.setFlipX(vx < 0);
+        // рух по синусоїді від baseX з амплітудою amp, рахований НАПРЯМУ з
+        // фази (а не інтегруванням швидкості по кадрах) — так розмах точно
+        // ніколи не вилазить за [baseX-amp, baseX+amp], без накопичення
+        // похибки Ейлера за довгий час польоту. e.amp/e.baseX/e.angSpeed
+        // виставляються в spawnEnemy(); якщо гелікоптер створений вручну
+        // (напр. у тестах, без spawnEnemy()) і цих полів немає — просто не
+        // гойдається (amp за замовчуванням 0), як і раніше поводилась
+        // "нульова" амплітуда
+        e.phase += dt * (e.angSpeed || 2);
+        const amp = e.amp || 0;
+        if (amp > 0.5) {
+          const baseX = e.baseX != null ? e.baseX : e.x;
+          e.x = Phaser.Math.Clamp(baseX + amp * Math.sin(e.phase), HELI_AMP_MARGIN, W - HELI_AMP_MARGIN);
+          // похідна sin(phase) — це cos(phase); угловая швидкість завжди
+          // додатна, тож знак cos(phase) і є напрямком миттєвого руху
+          e.img.setFlipX(Math.cos(e.phase) < 0);
+        }
         // стрільба по гравцю, поки гелікоптер видно на екрані — приціл
         // береться в момент пострілу (без самонаведення в польоті)
         if (e.y > 6 && e.y < H - 10) {
@@ -1419,14 +1509,68 @@ class GameScene extends Phaser.Scene {
     }
   }
 
-  collectBalloon(b, idx) {
-    const letter = b.letter;
+  // Збиття кульки більше НЕ активує бонус одразу — постріл лише "спльовує"
+  // кульку (очки + вибух, як і раніше), а на її місці лишається жовте коло
+  // з тією ж літерою (spawnBonusPickup()). Сам ефект бонуса вмикається
+  // окремо, лише коли гравець залітає в це коло (updateBonusPickups() →
+  // applyBonusEffect()) — дивись коментар біля BONUS_PICKUP_RADIUS вище.
+  popBalloon(b, idx) {
     this.addScore(40);
     this.spawnExplosion(b.x, b.y);
     b.img.destroy();
     b.label.destroy();
     this.balloons.splice(idx, 1);
+    this.spawnBonusPickup(b.x, b.y, b.letter);
+  }
 
+  spawnBonusPickup(x, y, letter) {
+    // "дихаюче" жовте коло — стартовий колір байдужий, updateBonusPickups()
+    // одразу першим кадром перепише fillColor за фазою
+    const circle = this.add.circle(x, y, BONUS_PICKUP_RADIUS, COL.pickupYellowLight).setDepth(6);
+    const label = this.add.text(x, y, letter, {
+      fontFamily: 'Courier New, monospace', fontSize: '14px', fontStyle: 'bold', color: '#2b2000'
+    }).setOrigin(0.5).setDepth(7);
+    this.bonusPickups.push({ circle, label, letter, x, y, phase: Math.random() * Math.PI * 2 });
+  }
+
+  updateBonusPickups(scrollDelta, dt) {
+    for (let i = this.bonusPickups.length - 1; i >= 0; i--) {
+      const p = this.bonusPickups[i];
+      p.y += scrollDelta;
+      p.phase += dt * BONUS_PICKUP_BREATH_SPEED;
+      // (sin+1)/2 переводить -1..1 у 0..1 — плавне "дихання" між темнішим і
+      // світлішим жовтим по колу, без різких стрибків кольору
+      const t = (Math.sin(p.phase) + 1) / 2;
+      p.circle.fillColor = lerpColor(COL.pickupYellowDark, COL.pickupYellowLight, t);
+      p.circle.x = p.x; p.circle.y = p.y;
+      p.label.x = p.x; p.label.y = p.y;
+
+      if (p.y > H + 40) {
+        p.circle.destroy(); p.label.destroy();
+        this.bonusPickups.splice(i, 1);
+        continue;
+      }
+
+      // гравець залетів у коло — ТІЛЬКИ тут активується сам ефект бонуса
+      // (той самий guard invulnTimer, що й у заправки — не підбираємо під
+      // час миготіння недоторканності після респавну)
+      if (this.invulnTimer <= 0) {
+        const dx = Math.abs(this.player.x - p.x);
+        const dy = Math.abs(PLAYER_Y - p.y);
+        if (dx < BONUS_PICKUP_RADIUS + 6 && dy < BONUS_PICKUP_RADIUS + 6) {
+          this.applyBonusEffect(p.letter);
+          p.circle.destroy(); p.label.destroy();
+          this.bonusPickups.splice(i, 1);
+        }
+      }
+    }
+  }
+
+  // Сам ефект бонуса за літерою — раніше це була друга половина
+  // collectBalloon(), тепер викликається окремо, з updateBonusPickups(),
+  // у момент коли гравець залітає в жовте коло-підбирач (не одразу після
+  // збиття кульки).
+  applyBonusEffect(letter) {
     if (letter === 'F') {
       this.fuel = FUEL_MAX;
       SFX.fuel();
@@ -1477,15 +1621,15 @@ class GameScene extends Phaser.Scene {
 
     if (this.activePower === 'double') {
       if (this.missiles.length >= 2) return;
-      this.spawnMissile(0, -MISSILE_SPEED, true);
+      this.spawnMissile(0, -MISSILE_SPEED);
     } else if (this.activePower === 'triple') {
       if (this.missiles.length > 0) return;
-      this.spawnMissile(0, -MISSILE_SPEED, true);   // звичайний постріл вперед
-      this.spawnMissile(-MISSILE_SPEED, 0, false);  // спеціальний вліво
-      this.spawnMissile(MISSILE_SPEED, 0, false);   // спеціальний вправо
+      this.spawnMissile(0, -MISSILE_SPEED);   // постріл вперед
+      this.spawnMissile(-MISSILE_SPEED, 0);   // бічний вліво — теж збиває кульки-бонуси
+      this.spawnMissile(MISSILE_SPEED, 0);    // бічний вправо — теж збиває кульки-бонуси
     } else if (this.activePower === 'missile') {
       if (this.missiles.length > 0) return;
-      this.spawnMissile(0, -MISSILE_SPEED, true);   // звичайний постріл залишається
+      this.spawnMissile(0, -MISSILE_SPEED);   // звичайний постріл залишається
       this.spawnHomingMissile(-1);                  // + самонавідні з боків
       this.spawnHomingMissile(1);
       // лічильник зменшується на 1 за ВЕСЬ постріл (не за кожну з двох
@@ -1498,19 +1642,19 @@ class GameScene extends Phaser.Scene {
       }
     } else {
       if (this.missiles.length > 0) return;
-      this.spawnMissile(0, -MISSILE_SPEED, true);
+      this.spawnMissile(0, -MISSILE_SPEED);
     }
     SFX.shoot();
   }
 
-  spawnMissile(vx, vy, isNormal = true) {
+  spawnMissile(vx, vy) {
     const sideways = vx !== 0;
     const offsetX = sideways ? (vx < 0 ? -13 : 13) : 0;
     const startX = this.player.x + offsetX;
     const startY = sideways ? PLAYER_Y - 4 : PLAYER_Y - 20;
     const img = this.add.image(startX, startY, 'missile').setDepth(9);
     if (sideways) img.setAngle(vx < 0 ? -90 : 90);
-    this.missiles.push({ img, x: startX, y: startY, vx, vy, homing: false, target: null, normal: isNormal });
+    this.missiles.push({ img, x: startX, y: startY, vx, vy, homing: false, target: null });
   }
 
   spawnHomingMissile(side) {
@@ -1528,8 +1672,9 @@ class GameScene extends Phaser.Scene {
     // тож формула повороту (rotation = atan2(vy,vx) + PI/2) не змінювалась
     const img = this.add.image(startX, startY, 'homingMissile').setDepth(9).setScale(HOMING_MISSILE_SCALE);
     img.rotation = Math.atan2(vy, vx) + Math.PI / 2;
-    // самонавідні ракети — спеціальна зброя, кулі-бонуси не чіпають
-    this.missiles.push({ img, x: startX, y: startY, vx, vy, homing: true, target, normal: false });
+    // самонавідні ракети — спеціальна зброя, кулі-бонуси не чіпають (див.
+    // умову `!m.homing` у resolveMissileCollision(), балон-цикл)
+    this.missiles.push({ img, x: startX, y: startY, vx, vy, homing: true, target });
   }
 
   findNearestTarget(x, y) {
@@ -1638,12 +1783,16 @@ class GameScene extends Phaser.Scene {
       }
     }
 
-    // влучання по повітряній кулі-бонусу — тільки звичайний постріл,
-    // спеціальна зброя (бокові/самонавідні постріли) кулі ігнорує
-    for (let i = 0; m.normal && i < this.balloons.length; i++) {
+    // влучання по повітряній кулі-бонусу — будь-який постріл гравця, ВКЛЮЧНО
+    // з бічними пострілами triple-бонусу (раніше збивали лише постріли
+    // вперед — це виглядало як баг, бо гравець не розумів, чому бічний
+    // постріл кульку "не бачить"); самонавідні ракети (`homing`) лишаються
+    // винятком — вони спеціальна зброя, що ціль собі шукає сама, і кулі не
+    // мають бути одним з можливих випадкових цілей
+    for (let i = 0; !m.homing && i < this.balloons.length; i++) {
       const b = this.balloons[i];
       if (pixelHit(b.img, mx, my)) {
-        this.collectBalloon(b, i);
+        this.popBalloon(b, i);
         m.img.destroy();
         return true;
       }

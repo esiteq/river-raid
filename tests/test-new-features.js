@@ -28,10 +28,22 @@
 //     "НАТИСНІТЬ ПРОБІЛ ДЛЯ ПОЧАТКУ", і під нею рядок з версією, "by Alex
 //     Raven" та клікабельним посиланням "GitHub" (окремі text-об'єкти,
 //     складені в один візуальний рядок)
-// 18) HUD: напис "LIVES N" перенесено з верхнього лівого кута в нижній ряд
+// 18) HUD: кількість життів перенесена з верхнього лівого кута в нижній ряд
 //     (той самий рядок, що й FUEL), справа, з іконкою літака поруч (розмір
 //     іконки == висота шрифту); текст лишається приклеєним правим краєм до
-//     екрана, а іконка сама зсувається при зміні кількості цифр (не наїжджає)
+//     екрана, а іконка сама зсувається при зміні кількості цифр (не наїжджає);
+//     саме слово "LIVES" прибрано — тепер лише цифра (іконка й так пояснює)
+// 19) гелікоптери: амплітуда бічних гойдань тепер рандомна на кожен спавн
+//     (раніше — фіксована ~20px), але затиснута під точку спавну так, щоб
+//     розмах ніколи не виводив гелікоптер за межі ігрового поля (0..W)
+// 20) бічні постріли triple-бонусу тепер теж збивають кулі-бонуси (раніше
+//     влучав лише прямий постріл вперед, m.normal — прибрано, замінено на
+//     !m.homing, самонавідні ракети лишаються винятком)
+// 21) збита кулька лишає жовте коло-підбирач з тією ж літерою — сам ефект
+//     бонуса активується не одразу, а лише коли гравець залітає в коло
+//     (popBalloon → spawnBonusPickup → updateBonusPickups → applyBonusEffect);
+//     колір кола плавно "дихає" з часом (lerpColor між темнішим і
+//     світлішим жовтим)
 const { chromium } = require('playwright');
 const path = require('path');
 const { startServer } = require('./serve');
@@ -286,7 +298,7 @@ async function waitForTitleScene(page) {
     s.spawnDecoImages(row, y);
     const img = row.decoLeft.img;
     const scoreBefore = s.score;
-    const fakeMissile = { x: img.x, y: img.y, img: { destroy() {} }, normal: true };
+    const fakeMissile = { x: img.x, y: img.y, img: { destroy() {} }, homing: false };
     const hit = s.resolveMissileCollision(fakeMissile);
     return { hit, scoreDelta: s.score - scoreBefore, decoGone: row.decoLeft === null };
   });
@@ -366,10 +378,11 @@ async function waitForTitleScene(page) {
       s.missiles = [];
       return { count, anyHoming, homingTexture, homingDisplaySize };
     }
-    const fakeBalloon = () => ({ x: 0, y: 0, letter: 'M', img: { destroy() {} }, label: { destroy() {} } });
-
-    s.balloons = [fakeBalloon()];
-    s.collectBalloon(s.balloons[0], 0);
+    // логіка ефекту бонуса тепер окремо від збиття кульки (applyBonusEffect
+    // застосовує ефект по літері напряму — саме це раніше робив
+    // collectBalloon(), тепер це друга половина конвеєра "збив кульку →
+    // лишилось жовте коло → залетів у коло → applyBonusEffect")
+    s.applyBonusEffect('M');
     const afterFirstPickup = { activePower: s.activePower, homingCount: s.homingCount };
 
     const shot1 = fire();
@@ -381,8 +394,7 @@ async function waitForTitleScene(page) {
     const hudText = s.powerText.text;
 
     // повторний підбір, поки лічильник ще не 0 — має ДОДАТИ 50
-    s.balloons = [fakeBalloon()];
-    s.collectBalloon(s.balloons[0], 0);
+    s.applyBonusEffect('M');
     const afterSecondPickup = { activePower: s.activePower, homingCount: s.homingCount };
 
     // добиваємо лічильник до нуля одним пострілом
@@ -675,8 +687,9 @@ async function waitForTitleScene(page) {
   const hudResult = await page.evaluate(() => {
     const s = window.game.scene.keys.Game;
     const before = {
+      livesText: s.livesText.text, // має бути лише число, без слова "LIVES"
       livesTextY: s.livesText.y,
-      fuelLabelY: s.fuelLabel.y,
+      fuelIconY: s.fuelIcon.y,
       sameBottomRow: Math.abs(s.livesText.y - s.fuelBarBg.y) < 1,
       nearBottom: s.livesText.y > H - 40, // явно не вгорі екрана
       iconSize: { w: s.livesIcon.displayWidth, h: s.livesIcon.displayHeight },
@@ -700,15 +713,190 @@ async function waitForTitleScene(page) {
     return { before, after };
   });
   console.log('18) HUD: життя знизу, іконка поруч:', JSON.stringify(hudResult));
-  const okLivesHud = hudResult.before.sameBottomRow === true &&
+  const okLivesHud = /^\d+$/.test(hudResult.before.livesText) && // лише число, без слова "LIVES"
+    hudResult.before.sameBottomRow === true &&
     hudResult.before.nearBottom === true &&
     hudResult.before.iconMatchesTextHeight === true &&
     hudResult.before.iconLeftOfText === true &&
     hudResult.before.noOverlapWithFuelBar === true &&
     hudResult.before.textAnchoredRight === true &&
-    hudResult.after.livesText === 'LIVES 12' &&
+    hudResult.after.livesText === '12' &&
     hudResult.after.textStillAnchoredRight === true &&
     hudResult.after.iconLeftOfText === true;
+
+  // ---------- 19) гелікоптери: рандомна амплітуда гойдання, розмах не
+  // виводить за межі ігрового поля НАВІТЬ при спавні впритул до краю ----------
+  const heliAmpResult = await page.evaluate(() => {
+    const s = window.game.scene.keys.Game;
+    s.enemies = [];
+    s.enemyTimer = 0;
+    // спавнимо купу гелікоптерів примусово (обходимо ліміт 3 одночасно,
+    // очищуючи масив між спробами), щоб зібрати статистику по amp
+    const amps = [];
+    for (let i = 0; i < 40; i++) {
+      s.enemies = [];
+      s.spawnEnemy();
+      // spawnEnemy() рандомить тип — беремо лише якщо вийшов heli
+      const heli = s.enemies.find(e => e.type === 'heli');
+      if (heli) amps.push(heli.amp);
+    }
+    // окремо: гелікоптер, заспавнений вручну майже впритул до лівого краю —
+    // amp має бути затиснутий майже до нуля (інакше вилетів би за межі)
+    s.enemies = [];
+    const edgeImg = s.add.image(HELI_AMP_MARGIN - 5, -20, 'heli').setDepth(8);
+    const edgeEnemy = { img: edgeImg, type: 'heli', x: HELI_AMP_MARGIN - 5, y: -20, vx: 0, phase: 0, alive: true, dir: 1, fireTimer: 999 };
+    edgeEnemy.baseX = edgeEnemy.x;
+    const maxAmpLeft = edgeEnemy.baseX - HELI_AMP_MARGIN;
+    const maxAmpRight = (W - HELI_AMP_MARGIN) - edgeEnemy.baseX;
+    edgeEnemy.amp = Phaser.Math.Clamp(Math.min(HELI_AMP_MAX, maxAmpLeft, maxAmpRight), 0, HELI_AMP_MAX);
+    edgeEnemy.angSpeed = Phaser.Math.Clamp(HELI_SWAY_SPEED / Math.max(edgeEnemy.amp, 8), 0.4, 3);
+    s.enemies.push(edgeEnemy);
+    // ганяємо 500 кадрів (~8с ігрового часу) і стежимо, щоб e.x ніколи не
+    // вийшов за [0, W] — це і є буквальна вимога користувача "не вилітають
+    // за межі ігрового поля"
+    let minXSeen = Infinity, maxXSeen = -Infinity;
+    for (let f = 0; f < 500; f++) {
+      s.updateEnemies(0, 0.016);
+      const e = s.enemies[0];
+      if (!e) break;
+      minXSeen = Math.min(minXSeen, e.x);
+      maxXSeen = Math.max(maxXSeen, e.x);
+    }
+    return {
+      sampleCount: amps.length,
+      minAmp: amps.length ? Math.min(...amps) : null,
+      maxAmp: amps.length ? Math.max(...amps) : null,
+      distinctAmpCount: new Set(amps.map(a => Math.round(a))).size,
+      edgeAmp: edgeEnemy.amp,
+      minXSeen, maxXSeen,
+      HELI_AMP_MAX, HELI_AMP_MARGIN, W,
+    };
+  });
+  console.log('19) амплітуда гелікоптерів:', JSON.stringify(heliAmpResult));
+  const okHeliAmplitude = heliAmpResult.sampleCount > 5 &&
+    heliAmpResult.distinctAmpCount > 3 && // амплітуди реально різні, а не одне захардкоджене число
+    heliAmpResult.maxAmp <= heliAmpResult.HELI_AMP_MAX + 0.001 &&
+    heliAmpResult.edgeAmp < 15 && // майже впритул до краю → amp затиснутий у крихітний
+    heliAmpResult.minXSeen >= -0.5 && heliAmpResult.maxXSeen <= heliAmpResult.W + 0.5;
+
+  // ---------- 20) бічні постріли triple-бонусу тепер ТЕЖ збивають
+  // повітряні кулі-бонуси (раніше — лише прямий постріл вперед) ----------
+  const tripleBalloonResult = await page.evaluate(() => {
+    const s = window.game.scene.keys.Game;
+    s.balloons.forEach(b => { b.img.destroy(); b.label.destroy(); });
+    s.balloons = [];
+    s.bonusPickups.forEach(p => { p.circle.destroy(); p.label.destroy(); });
+    s.bonusPickups = [];
+
+    // ставимо кульку точно там, куди прилетить БІЧНИЙ постріл (вліво від
+    // гравця, на висоті самого пострілу — startY = PLAYER_Y - 4)
+    const bx = s.player.x - 40, by = PLAYER_Y - 4;
+    const img = s.add.image(bx, by, 'balloon').setDepth(7).setScale(BALLOON_SCALE);
+    const label = s.add.text(bx, by - 6, 'T', { fontFamily: 'Courier New, monospace', fontSize: '13px' }).setOrigin(0.5).setDepth(8);
+    s.balloons.push({ img, label, letter: 'T', x: bx, y: by, phase: 0 });
+
+    // напряму спавнимо БІЧНИЙ снаряд вліво (той самий виклик, що й у
+    // handleShooting() для triple) і рухаємо колізії на нього
+    s.spawnMissile(-MISSILE_SPEED, 0);
+    const m = s.missiles[s.missiles.length - 1];
+    m.x = bx; m.y = by; m.img.x = bx; m.img.y = by;
+    const balloonsBefore = s.balloons.length;
+    const hit = s.resolveMissileCollision(m);
+    return {
+      balloonsBefore, hit,
+      balloonsAfter: s.balloons.length,
+      pickupsAfter: s.bonusPickups.length,
+    };
+  });
+  console.log('20) бічний постріл triple збиває кульку:', JSON.stringify(tripleBalloonResult));
+  const okTripleHitsBalloon = tripleBalloonResult.balloonsBefore === 1 &&
+    tripleBalloonResult.hit === true &&
+    tripleBalloonResult.balloonsAfter === 0 &&
+    tripleBalloonResult.pickupsAfter === 1; // збита кулька лишила по собі підбирач бонуса
+
+  // ---------- 21) збита кулька лишає жовте коло-підбирач з тією ж літерою;
+  // бонус активується НЕ одразу при збитті, а лише коли гравець залітає в
+  // коло; колір кола з часом "дихає" (змінюється, не статичний) ----------
+  const pickupResult = await page.evaluate(() => {
+    const s = window.game.scene.keys.Game;
+    s.balloons.forEach(b => { b.img.destroy(); b.label.destroy(); });
+    s.balloons = [];
+    s.bonusPickups.forEach(p => { p.circle.destroy(); p.label.destroy(); });
+    s.bonusPickups = [];
+    s.activePower = null;
+    s.player.x = 240;
+
+    // кулька ДАЛЕКО від гравця по X, щоб збиття точно не збіглося з підбором
+    const bx = 20, by = PLAYER_Y;
+    const img = s.add.image(bx, by, 'balloon').setDepth(7).setScale(BALLOON_SCALE);
+    const label = s.add.text(bx, by - 6, 'D', { fontFamily: 'Courier New, monospace', fontSize: '13px' }).setOrigin(0.5).setDepth(8);
+    s.balloons.push({ img, label, letter: 'D', x: bx, y: by, phase: 0 });
+    s.popBalloon(s.balloons[0], 0);
+
+    const rightAfterPop = {
+      activePower: s.activePower, // МАЄ лишитись null — бонус ще не активувався
+      pickupsCount: s.bonusPickups.length,
+      pickupLetter: s.bonusPickups[0] ? s.bonusPickups[0].letter : null,
+    };
+
+    // прокручуємо кілька кадрів, поки гравець НЕ в колі — бонус і далі не
+    // повинен активуватись
+    for (let f = 0; f < 20; f++) s.updateBonusPickups(0, 0.016);
+    const stillWaiting = { activePower: s.activePower, pickupsCount: s.bonusPickups.length };
+
+    // колір "дихає" — знімаємо fillColor у двох різних фазах і перевіряємо,
+    // що він реально змінюється з часом (не застиг на одному значенні)
+    const p = s.bonusPickups[0];
+    const colorA = p.circle.fillColor;
+    for (let f = 0; f < 15; f++) s.updateBonusPickups(0, 0.016); // ще трохи часу для видимої зміни фази
+    const colorB = p.circle.fillColor;
+
+    // тепер підводимо гравця точно в коло — бонус має активуватись САМЕ тут
+    s.invulnTimer = 0;
+    s.player.x = p.x;
+    s.updateBonusPickups(0, 0.016);
+    const afterEnteringCircle = {
+      activePower: s.activePower,
+      pickupsCount: s.bonusPickups.length,
+    };
+
+    return { rightAfterPop, stillWaiting, colorA, colorB, afterEnteringCircle };
+  });
+  console.log('21) жовте коло-підбирач бонуса:', JSON.stringify(pickupResult));
+  const okBonusPickup = pickupResult.rightAfterPop.activePower === null &&
+    pickupResult.rightAfterPop.pickupsCount === 1 &&
+    pickupResult.rightAfterPop.pickupLetter === 'D' &&
+    pickupResult.stillWaiting.activePower === null &&
+    pickupResult.stillWaiting.pickupsCount === 1 &&
+    pickupResult.colorA !== pickupResult.colorB && // колір реально змінився з часом ("дихання")
+    pickupResult.afterEnteringCircle.activePower === 'double' &&
+    pickupResult.afterEnteringCircle.pickupsCount === 0;
+
+  // ---------- 22) HUD-написи жовті (не зелені), FUEL-текст замінено іконкою
+  // бочки ----------
+  const hudColorResult = await page.evaluate(() => {
+    const s = window.game.scene.keys.Game;
+    const toHexNum = c => (typeof c === 'number' ? c : Phaser.Display.Color.HexStringToColor(c).color);
+    return {
+      scoreColor: s.scoreText.style.color,
+      levelColor: s.levelText.style.color,
+      livesColor: s.livesText.style.color,
+      hasFuelLabel: !!s.fuelLabel,
+      fuelIconExists: !!s.fuelIcon,
+      fuelIconTexture: s.fuelIcon ? s.fuelIcon.texture.key : null,
+      fuelIconLeftOfBar: s.fuelIcon ? (s.fuelIcon.x + s.fuelIcon.displayWidth / 2) <= s.fuelBarBg.x : false,
+    };
+  });
+  console.log('22) HUD жовтий колір + іконка бочки замість FUEL:', JSON.stringify(hudColorResult));
+  const notGreen = c => c !== '#39ff6a';
+  const okHudYellow = notGreen(hudColorResult.scoreColor) && notGreen(hudColorResult.levelColor) &&
+    notGreen(hudColorResult.livesColor) &&
+    hudColorResult.scoreColor === hudColorResult.levelColor &&
+    hudColorResult.scoreColor === hudColorResult.livesColor &&
+    hudColorResult.hasFuelLabel === false &&
+    hudColorResult.fuelIconExists === true &&
+    hudColorResult.fuelIconTexture === 'fuel' &&
+    hudColorResult.fuelIconLeftOfBar === true;
 
   await browser.close();
   server.close();
@@ -732,10 +920,15 @@ async function waitForTitleScene(page) {
   console.log('okSand:', okSand);
   console.log('okFuselageOnly:', okFuselageOnly);
   console.log('okLivesHud:', okLivesHud);
+  console.log('okHeliAmplitude:', okHeliAmplitude);
+  console.log('okTripleHitsBalloon:', okTripleHitsBalloon);
+  console.log('okBonusPickup:', okBonusPickup);
+  console.log('okHudYellow:', okHudYellow);
 
   const allOk = errors.length === 0 && okIconsLoaded && okHeliFires && okHeliHits && okDecoDestroyed &&
     okDecoImages && okRiverBendsMore && okJetFlip && okNoFuelLabel && okExplosionAnim &&
     okHoming && okPixelMask && okTitleScreen && okIslandChannel && okDecoSpread && okFuelCap &&
-    okSand && okFuselageOnly && okLivesHud;
+    okSand && okFuselageOnly && okLivesHud && okHeliAmplitude && okTripleHitsBalloon && okBonusPickup &&
+    okHudYellow;
   process.exitCode = allOk ? 0 : 1;
 })();
