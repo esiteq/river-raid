@@ -614,38 +614,6 @@ async function waitForTitleScene(page) {
     sandResult.nearMaxA > 0 && sandResult.nearMaxB > 0 && // подекуди сягає майже максимуму
     sandResult.drawThrew === false;
 
-  // ---------- 16) анімовані сплески на воді (waveSplash): спавняться на
-  // воді, ростуть/тьмяніють і самі зникають після WAVE_DURATION, кількість
-  // одночасних сплесків обмежена WAVE_MAX_ONSCREEN ----------
-  const waveResult = await page.evaluate(() => {
-    const s = window.game.scene.keys.Game;
-    s.waveSplashes.forEach(w => w.img.destroy());
-    s.waveSplashes = [];
-    for (let i = 0; i < 5; i++) s.spawnWaveSplash(); // кілька спроб — деякі рядки можуть мати вузьку воду
-    const spawnedAtLeastOne = s.waveSplashes.length >= 1;
-    const first = s.waveSplashes[0];
-    const textureOk = first ? first.img.texture.key === 'waveSplash' : false;
-    const scaleAtStart = first ? first.img.scaleX : null;
-
-    // прокручуємо час одним великим кроком — сплески мають самі зникнути
-    s.updateWaveSplashes(0, WAVE_DURATION + 0.1);
-    const goneAfterDuration = s.waveSplashes.length === 0;
-
-    // ліміт одночасних сплесків
-    s.waveSplashes = [];
-    for (let i = 0; i < WAVE_MAX_ONSCREEN + 15; i++) s.spawnWaveSplash();
-    const cappedCount = s.waveSplashes.length;
-    s.waveSplashes.forEach(w => w.img.destroy());
-    s.waveSplashes = [];
-
-    return { spawnedAtLeastOne, textureOk, scaleAtStart, goneAfterDuration, cappedCount, WAVE_MAX_ONSCREEN, WAVE_START_SCALE };
-  });
-  console.log('16) сплески на воді:', JSON.stringify(waveResult));
-  const okWaves = waveResult.spawnedAtLeastOne === true && waveResult.textureOk === true &&
-    Math.abs(waveResult.scaleAtStart - waveResult.WAVE_START_SCALE) < 0.001 &&
-    waveResult.goneAfterDuration === true &&
-    waveResult.cappedCount === waveResult.WAVE_MAX_ONSCREEN;
-
   await browser.close();
   server.close();
 
@@ -666,11 +634,10 @@ async function waitForTitleScene(page) {
   console.log('okDecoSpread:', okDecoSpread);
   console.log('okFuelCap:', okFuelCap);
   console.log('okSand:', okSand);
-  console.log('okWaves:', okWaves);
 
   const allOk = errors.length === 0 && okIconsLoaded && okHeliFires && okHeliHits && okDecoDestroyed &&
     okDecoImages && okRiverBendsMore && okJetFlip && okNoFuelLabel && okExplosionAnim &&
     okHoming && okPixelMask && okTitleScreen && okIslandChannel && okDecoSpread && okFuelCap &&
-    okSand && okWaves;
+    okSand;
   process.exitCode = allOk ? 0 : 1;
 })();

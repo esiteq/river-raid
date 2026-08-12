@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 // версія гри — показується на тайтл-екрані ("vX.Y by Alex Raven"). Онови
 // цей рядок разом із записом у CHANGELOG.md при кожній помітній зміні.
-const GAME_VERSION = '1.19';
+const GAME_VERSION = '1.20';
 
 const W = 480;
 // ігрове поле займає всю висоту екрана: беремо реальну висоту вікна
@@ -76,13 +76,6 @@ const DECO_EDGE_MARGIN = 16; // мін. відстань дерева/куща �
 
 const SAND_MAX_WIDTH = 32; // жовтий пісок біля води — макс. ширина смуги (0..32px, "дихає" по берегу, ніде не паралельна воді)
 
-// сплески/брижі на воді — короткоживучі анімовані спрайти, що з'являються
-// й одразу згасають; чисто косметика, на геймплей не впливають
-const WAVE_SPAWN_MIN = 0.12, WAVE_SPAWN_MAX = 0.3; // сек між появою нових сплесків
-const WAVE_MAX_ONSCREEN = 22;      // запобіжник, щоб не рябіло й не росло безмежно
-const WAVE_DURATION = 0.85;        // сек життя одного сплеску
-const WAVE_START_SCALE = 0.35, WAVE_PEAK_SCALE = 1.15; // росте, потім трохи "розпливається"
-
 
 const MISSILE_SPEED = 520;
 // бонус 'M' (HOMING) — скільки самонавідних пострілів дає ОДНА підібрана
@@ -105,8 +98,7 @@ const COL = {
   white: 0xffffff, black: 0x000000, tan: 0xd9c08a,
   waterBlue: 0x1560c4,
   landGreen: 0x0e6b1a, landGreenEdge: 0x18a02a,
-  sand: 0xe0b64a, sandEdge: 0xf0d27a,
-  waveWhite: 0xeaf6ff,
+  sand: 0xe0b64a,
   bridgeGray: 0x9aa0a6, bridgeDark: 0x555b60,
   exploYellow: 0xffe066, exploOrange: 0xff8c42, exploRed: 0xe03c3c,
   hudGreen: 0x39ff6a,
@@ -249,17 +241,6 @@ function generateAllTextures(scene) {
   bakeTexture(scene, 'bridgeTower', 8, 16, 2, (g, px) => {
     P(g, px, 0, 0, 8, 16, c.grayDarker);
     P(g, px, 2, 2, 4, 12, c.bridgeDark);
-  });
-
-  // --- Сплеск/брижі на воді, сітка 10x10, px=2 — маленька біла "іскра" з
-  // 4 промінців і світло-блакитним центром; масштаб і альфа анімуються в
-  // spawnWaveSplash()/updateWaveSplashes(), сама текстура статична ---
-  bakeTexture(scene, 'waveSplash', 10, 10, 2, (g, px) => {
-    P(g, px, 4, 0, 2, 3, c.waveWhite);
-    P(g, px, 4, 7, 2, 3, c.waveWhite);
-    P(g, px, 0, 4, 3, 2, c.waveWhite);
-    P(g, px, 7, 4, 3, 2, c.waveWhite);
-    circ(g, px, 5, 5, 1.6, c.cockpit);
   });
 }
 
@@ -434,17 +415,21 @@ class TerrainGen {
     }
 
     // --- жовтий пісок біля води ---
-    // та сама "інерція з м'яким відбиттям", що й halfVel/centerVel вище,
-    // але діапазон [0, SAND_MAX_WIDTH] включає сам нуль — тож пісок то
-    // з'являється, то зникає, і ніде не тягнеться суворо паралельно воді.
-    // Рахується щорядка незалежно від "заморожених" рядків мосту — це
-    // просто косметична смуга поверх уже намальованого берега.
-    this.sandAVel = Phaser.Math.Clamp(this.sandAVel + Phaser.Math.FloatBetween(-1.6, 1.6), -3.5, 3.5);
+    // та сама "інерція з м'яким відбиттям", що й halfVel/centerVel вище, і
+    // навмисно в ТІЙ САМІЙ пропорції "крок/діапазон" — щоб внутрішній край
+    // піску був так само плавним, як і сам берег, а не зубчастим/шумним
+    // (крок і межа швидкості тут пропорційно зменшені під менший діапазон
+    // 0..SAND_MAX_WIDTH, а не скопійовані як є). Діапазон [0, SAND_MAX_WIDTH]
+    // включає сам нуль — тож пісок то з'являється, то зникає, і ніде не
+    // тягнеться суворо паралельно воді. Рахується щорядка незалежно від
+    // "заморожених" рядків мосту — це просто косметична смуга поверх уже
+    // намальованого берега.
+    this.sandAVel = Phaser.Math.Clamp(this.sandAVel + Phaser.Math.FloatBetween(-0.06, 0.06), -0.28, 0.28);
     let newSandA = this.sandA + this.sandAVel;
     if (newSandA < 0 || newSandA > SAND_MAX_WIDTH) this.sandAVel *= -0.4;
     this.sandA = Phaser.Math.Clamp(newSandA, 0, SAND_MAX_WIDTH);
 
-    this.sandBVel = Phaser.Math.Clamp(this.sandBVel + Phaser.Math.FloatBetween(-1.6, 1.6), -3.5, 3.5);
+    this.sandBVel = Phaser.Math.Clamp(this.sandBVel + Phaser.Math.FloatBetween(-0.06, 0.06), -0.28, 0.28);
     let newSandB = this.sandB + this.sandBVel;
     if (newSandB < 0 || newSandB > SAND_MAX_WIDTH) this.sandBVel *= -0.4;
     this.sandB = Phaser.Math.Clamp(newSandB, 0, SAND_MAX_WIDTH);
@@ -697,9 +682,6 @@ class GameScene extends Phaser.Scene {
     this.tankTimer = 3.5;
     this.balloonTimer = 6.0;
 
-    this.waveSplashes = []; // {img, t} — анімовані сплески на воді, чисто косметика
-    this.waveTimer = 0.3;
-
     // --- керування ---
     this.cursors = this.input.keyboard.createCursorKeys();
     this.keys = this.input.keyboard.addKeys('SPACE,P,ESC,ENTER');
@@ -848,7 +830,6 @@ class GameScene extends Phaser.Scene {
     this.drawTerrain();
     this.updateBridgeVisuals(scrollDelta, dt);
     this.updateDecoImages(scrollDelta);
-    this.updateWaveSplashes(scrollDelta, dt);
     this.updateEnemies(scrollDelta, dt);
     this.updateFuels(scrollDelta, dt);
     this.updateTanks(scrollDelta, dt);
@@ -1114,62 +1095,6 @@ class GameScene extends Phaser.Scene {
     this.fuels.push({ img, x, y: -20, alive: true });
   }
 
-  // --- сплески/брижі на воді (косметика, не впливають на геймплей) ---
-  // обирає випадковий рядок серед РЕАЛЬНО видимих на екрані, потім
-  // випадкову точку на воді цього рядка (не на суходолі — враховує острів,
-  // якщо він є на цьому рядку), і спавнить там маленьку анімовану "іскру".
-  spawnWaveSplash() {
-    if (this.waveSplashes.length >= WAVE_MAX_ONSCREEN) return;
-    const visibleRows = [];
-    for (let i = 0; i < this.rows.length; i++) {
-      const y = i * ROW_H + this.scrollAccum;
-      if (y >= 0 && y <= H) visibleRows.push({ row: this.rows[i], y });
-    }
-    if (visibleRows.length === 0) return;
-    const { row, y } = visibleRows[Phaser.Math.Between(0, visibleRows.length - 1)];
-
-    // усі водні (не суходільні) горизонтальні відрізки цього рядка
-    const segments = row.islandLeft != null
-      ? [[row.left, row.islandLeft], [row.islandRight, row.right]]
-      : [[row.left, row.right]];
-    const widths = segments.map(s => Math.max(0, s[1] - s[0]));
-    const totalW = widths.reduce((a, b) => a + b, 0);
-    if (totalW < 6) return; // річки на цьому рядку майже не видно — пропускаємо спробу
-
-    let pick = Phaser.Math.FloatBetween(0, totalW);
-    let seg = segments[segments.length - 1];
-    for (let i = 0; i < segments.length; i++) {
-      if (pick <= widths[i]) { seg = segments[i]; break; }
-      pick -= widths[i];
-    }
-    if (seg[1] - seg[0] < 6) return; // обраний відрізок закороткий — не влазить з відступом від берега
-
-    const x = Phaser.Math.FloatBetween(seg[0] + 3, seg[1] - 3);
-    const img = this.add.image(x, y + Phaser.Math.FloatBetween(0, ROW_H), 'waveSplash')
-      .setDepth(1).setScale(WAVE_START_SCALE).setAlpha(0.85).setAngle(Phaser.Math.Between(0, 359));
-    this.waveSplashes.push({ img, t: 0 });
-  }
-
-  updateWaveSplashes(scrollDelta, dt) {
-    for (let i = this.waveSplashes.length - 1; i >= 0; i--) {
-      const s = this.waveSplashes[i];
-      s.img.y += scrollDelta;
-      s.t += dt;
-      const p = Phaser.Math.Clamp(s.t / WAVE_DURATION, 0, 1);
-      if (p >= 1 || s.img.y < -20 || s.img.y > H + 20) {
-        s.img.destroy();
-        this.waveSplashes.splice(i, 1);
-        continue;
-      }
-      // перші 40% часу — росте до піку, решту — трохи "розпливається" й тане
-      const scale = p < 0.4
-        ? Phaser.Math.Linear(WAVE_START_SCALE, WAVE_PEAK_SCALE, p / 0.4)
-        : Phaser.Math.Linear(WAVE_PEAK_SCALE, WAVE_PEAK_SCALE * 1.3, (p - 0.4) / 0.6);
-      s.img.setScale(scale);
-      s.img.setAlpha(p < 0.4 ? 0.85 : Phaser.Math.Linear(0.85, 0, (p - 0.4) / 0.6));
-    }
-  }
-
   spawnShoreTank() {
     if (this.tanks.length >= 2) return; // не даємо танкам накопичуватись на екрані
     const row = this.rows[3];
@@ -1215,11 +1140,6 @@ class GameScene extends Phaser.Scene {
     if (this.balloonTimer <= 0) {
       this.spawnBalloon();
       this.balloonTimer = Phaser.Math.FloatBetween(11, 17);
-    }
-    this.waveTimer -= dt;
-    if (this.waveTimer <= 0) {
-      this.spawnWaveSplash();
-      this.waveTimer = Phaser.Math.FloatBetween(WAVE_SPAWN_MIN, WAVE_SPAWN_MAX);
     }
   }
 
