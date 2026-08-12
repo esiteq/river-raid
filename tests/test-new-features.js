@@ -28,6 +28,10 @@
 //     "НАТИСНІТЬ ПРОБІЛ ДЛЯ ПОЧАТКУ", і під нею рядок з версією, "by Alex
 //     Raven" та клікабельним посиланням "GitHub" (окремі text-об'єкти,
 //     складені в один візуальний рядок)
+// 18) HUD: напис "LIVES N" перенесено з верхнього лівого кута в нижній ряд
+//     (той самий рядок, що й FUEL), справа, з іконкою літака поруч (розмір
+//     іконки == висота шрифту); текст лишається приклеєним правим краєм до
+//     екрана, а іконка сама зсувається при зміні кількості цифр (не наїжджає)
 const { chromium } = require('playwright');
 const path = require('path');
 const { startServer } = require('./serve');
@@ -664,6 +668,48 @@ async function waitForTitleScene(page) {
     sandResult.nearMaxA > 0 && sandResult.nearMaxB > 0 && // подекуди сягає майже максимуму
     sandResult.drawThrew === false;
 
+  // ---------- 18) HUD: кількість життів перенесена в нижній ряд (разом з
+  // FUEL зліва), справа, з іконкою літака-гравця поруч, розміром рівно під
+  // висоту тексту; при зміні кількості цифр (1 → 12) текст лишається
+  // приклеєним до правого краю, а іконка сама зсувається, не наїжджаючи ----------
+  const hudResult = await page.evaluate(() => {
+    const s = window.game.scene.keys.Game;
+    const before = {
+      livesTextY: s.livesText.y,
+      fuelLabelY: s.fuelLabel.y,
+      sameBottomRow: Math.abs(s.livesText.y - s.fuelBarBg.y) < 1,
+      nearBottom: s.livesText.y > H - 40, // явно не вгорі екрана
+      iconSize: { w: s.livesIcon.displayWidth, h: s.livesIcon.displayHeight },
+      iconMatchesTextHeight: Math.abs(s.livesIcon.displayHeight - LIVES_ICON_SIZE) < 0.5,
+      iconLeftOfText: (s.livesIcon.x + s.livesIcon.displayWidth / 2) <= (s.livesText.x - s.livesText.width),
+      noOverlapWithFuelBar: (s.livesIcon.x - s.livesIcon.displayWidth / 2) > (s.fuelBarBg.x + s.fuelBarBg.width),
+      textAnchoredRight: s.livesText.x === W - 10,
+    };
+    // тепер штучно ставимо двозначну кількість життів і перевіряємо, що
+    // текст і далі впирається правим краєм у те саме місце, а іконка й
+    // далі не перекриває текст (найчутливіший сценарій — довший рядок)
+    s.lives = 12;
+    s.updateHUD();
+    const after = {
+      livesText: s.livesText.text,
+      textStillAnchoredRight: s.livesText.x === W - 10,
+      iconLeftOfText: (s.livesIcon.x + s.livesIcon.displayWidth / 2) <= (s.livesText.x - s.livesText.width),
+    };
+    s.lives = 3;
+    s.updateHUD();
+    return { before, after };
+  });
+  console.log('18) HUD: життя знизу, іконка поруч:', JSON.stringify(hudResult));
+  const okLivesHud = hudResult.before.sameBottomRow === true &&
+    hudResult.before.nearBottom === true &&
+    hudResult.before.iconMatchesTextHeight === true &&
+    hudResult.before.iconLeftOfText === true &&
+    hudResult.before.noOverlapWithFuelBar === true &&
+    hudResult.before.textAnchoredRight === true &&
+    hudResult.after.livesText === 'LIVES 12' &&
+    hudResult.after.textStillAnchoredRight === true &&
+    hudResult.after.iconLeftOfText === true;
+
   await browser.close();
   server.close();
 
@@ -685,10 +731,11 @@ async function waitForTitleScene(page) {
   console.log('okFuelCap:', okFuelCap);
   console.log('okSand:', okSand);
   console.log('okFuselageOnly:', okFuselageOnly);
+  console.log('okLivesHud:', okLivesHud);
 
   const allOk = errors.length === 0 && okIconsLoaded && okHeliFires && okHeliHits && okDecoDestroyed &&
     okDecoImages && okRiverBendsMore && okJetFlip && okNoFuelLabel && okExplosionAnim &&
     okHoming && okPixelMask && okTitleScreen && okIslandChannel && okDecoSpread && okFuelCap &&
-    okSand && okFuselageOnly;
+    okSand && okFuselageOnly && okLivesHud;
   process.exitCode = allOk ? 0 : 1;
 })();

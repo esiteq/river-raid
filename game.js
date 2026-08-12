@@ -13,7 +13,7 @@
 // версія гри — показується на тайтл-екрані ("vX.Y · by Alex Raven · GitHub",
 // де "GitHub" — клікабельне посилання на репозиторій). Онови цей рядок разом
 // із записом у CHANGELOG.md при кожній помітній зміні.
-const GAME_VERSION = '1.22';
+const GAME_VERSION = '1.23';
 
 const W = 480;
 // ігрове поле займає всю висоту екрана: беремо реальну висоту вікна
@@ -36,6 +36,12 @@ const PLAYER_VISUAL_WIDTH = 45;        // повна видима ширина �
 // (не за вузький хітбокс вище) — так гравець і "на око" бачить достатньо
 // місця, а не тільки технічно проскакує повз графіку
 const MIN_ISLAND_CHANNEL = PLAYER_VISUAL_WIDTH * 2;
+
+// іконка літака біля напису "LIVES" у нижньому HUD (не плутати з
+// PLAYER_SCALE/PLAYER_VISUAL_WIDTH — це для гри, тут окремий, набагато
+// менший розмір, підігнаний під висоту HUD-шрифту 18px)
+const LIVES_ICON_SIZE = 18;
+const LIVES_ICON_GAP = 6;              // відступ між іконкою і текстом "LIVES N"
 
 const MIN_SPEED = 16;                  // мін. швидкість скролу (px/сек) — майже зупинка для заправки
 const CRUISE_SPEED = 130;              // швидкість старту/респавну
@@ -725,13 +731,22 @@ class GameScene extends Phaser.Scene {
     const hudStyle = { fontFamily: 'Courier New, monospace', fontSize: '18px', color: '#39ff6a', fontStyle: 'bold' };
     this.scoreText = this.add.text(10, 8, 'SCORE 0', hudStyle).setDepth(30);
     this.levelText = this.add.text(W - 10, 8, 'LEVEL 1', hudStyle).setOrigin(1, 0).setDepth(30);
-    this.livesText = this.add.text(10, 30, '', hudStyle).setDepth(30);
     this.powerText = this.add.text(W / 2, 8, '', {
       fontFamily: 'Courier New, monospace', fontSize: '15px', fontStyle: 'bold', color: '#ff6ad5'
     }).setOrigin(0.5, 0).setDepth(30);
+    // нижній ряд HUD: паливо зліва, кількість життів (текст + іконка
+    // літака) справа — обидва на одній Y (H - 20), як єдиний нижній "пояс"
     this.fuelLabel = this.add.text(10, H - 26, 'FUEL', { fontFamily: 'Courier New, monospace', fontSize: '14px', color: '#cfe8ff' }).setDepth(30);
     this.fuelBarBg = this.add.rectangle(58, H - 20, 200, 14, 0x223344).setOrigin(0, 0.5).setDepth(30).setStrokeStyle(2, 0x0a1a2a);
     this.fuelBarFill = this.add.rectangle(60, H - 20, 196, 10, 0xffcc00).setOrigin(0, 0.5).setDepth(30);
+    // текст завжди "приклеєний" правим краєм до W-10 (setOrigin(1, 0.5)),
+    // тож при зміні кількості цифр (1 → 10+) рядок не "з'їжджає" з місця;
+    // іконка літака ставиться ліворуч від тексту в updateHUD() (де відомо
+    // this.livesText.width ПІСЛЯ setText) — розмір іконки навмисно рівний
+    // висоті шрифту (LIVES_ICON_SIZE), а не "на око", щоб виглядало як
+    // частина одного напису, а не окрема декорація довільного розміру
+    this.livesText = this.add.text(W - 10, H - 20, '', hudStyle).setOrigin(1, 0.5).setDepth(30);
+    this.livesIcon = this.add.image(0, H - 20, 'player').setDisplaySize(LIVES_ICON_SIZE, LIVES_ICON_SIZE).setDepth(30);
 
     this.centerMsg = this.add.text(W / 2, H / 2, '', {
       fontFamily: 'Courier New, monospace', fontSize: '30px', fontStyle: 'bold', color: '#ffffff', align: 'center'
@@ -748,6 +763,10 @@ class GameScene extends Phaser.Scene {
     this.scoreText.setText('SCORE ' + this.score);
     this.levelText.setText('LEVEL ' + this.level);
     this.livesText.setText('LIVES ' + Math.max(0, this.lives));
+    // іконка одразу ліворуч від щойно виставленого тексту (right-origin
+    // тексту лишається на місці, тож перераховуємо тільки позицію іконки)
+    this.livesIcon.x = this.livesText.x - this.livesText.width - LIVES_ICON_GAP - this.livesIcon.displayWidth / 2;
+    this.livesIcon.y = this.livesText.y;
     const powerNames = { triple: 'TRIPLE ★', double: 'DOUBLE ★' };
     this.powerText.setText(
       this.activePower === 'missile' ? `HOMING ★ ${this.homingCount}` :
